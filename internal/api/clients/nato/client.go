@@ -139,3 +139,12 @@ func (c *Client) Download(_ context.Context, params api.DownloadParams) ([]toon.
 	// TODO: implement Nato chapter/page scraping
 	return nil, toon.ErrNotFound
 }
+
+// DownloadWithExtraURLs behaves like Download but prepends extraURLs to the
+// client's configured URL list for this call only.
+func (c *Client) DownloadWithExtraURLs(ctx context.Context, slug string, chapterIDs []string, extraURLs []string) ([]toon.Chapter, error) {
+	original := c.BaseClient
+	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
+	defer func() { c.BaseClient = original }()
+	return c.Download(ctx, DownloadParams{Slug: slug, ChapterIDs: chapterIDs})
+}

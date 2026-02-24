@@ -70,4 +70,9 @@ type Client interface {
 	// Download returns the chapters (with pages) described by the source-specific params.
 	// Returns (nil, toon.ErrNotFound) when nothing was found on any URL.
 	Download(ctx context.Context, params DownloadParams) ([]toon.Chapter, error)
+
+	// DownloadWithExtraURLs behaves like Download but prepends extraURLs to the
+	// client's configured URL list for this call only.
+	// slug is the toon identifier; chapterIDs limits download to specific chapters.
+	DownloadWithExtraURLs(ctx context.Context, slug string, chapterIDs []string, extraURLs []string) ([]toon.Chapter, error)
 }

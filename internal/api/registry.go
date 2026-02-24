@@ -8,6 +8,7 @@ import (
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
 	"github.com/Zapharaos/offtoon-backend/pkg/workerpool"
+	"github.com/Zapharaos/offtoon-backend/pkg/wsruntime"
 	"go.uber.org/zap"
 )
 
@@ -214,6 +215,93 @@ func (r *Registry) Download(ctx context.Context, params DownloadParams) ([]toon.
 		return nil, err
 	}
 	return c.Download(ctx, params)
+}
+
+// DownloadSource downloads individual chapters from the given source concurrently,
+// using a worker pool. After each completed batch of chapters, onProgress is called
+// with the current wsruntime.Progress snapshot so the caller can push it to
+// connected WebSocket clients.
+//
+// source identifies the API client; extraURLs are prepended to its URL list.
+// slug is the toon slug; chapterIDs is the list of chapter IDs to download.
+// onProgress may be nil if progress notifications are not needed.
+//
+// Returns the full list of downloaded chapters or toon.ErrNotFound when none
+// of the requested chapters were found.
+func (r *Registry) DownloadSource(
+	ctx context.Context,
+	source Source,
+	slug string,
+	chapterIDs []string,
+	extraURLs []string,
+	onProgress func(wsruntime.Progress),
+) ([]toon.Chapter, error) {
+	c, err := r.Client(string(source))
+	if err != nil {
+		return nil, fmt.Errorf("api.Registry.DownloadSource: %w", err)
+	}
+
+	total := len(chapterIDs)
+	if total == 0 {
+		return nil, fmt.Errorf("api.Registry.DownloadSource: no chapter IDs provided")
+	}
+
+	progress := wsruntime.NewProgress(total, workerpool.NewConfigOptimal(total, -1).BatchSize)
+
+	type job struct {
+		chapterID string
+	}
+
+	workerFunc := func(ctx context.Context, j job) (toon.Chapter, error) {
+		chapters, err := c.DownloadWithExtraURLs(ctx, slug, []string{j.chapterID}, extraURLs)
+		if err != nil {
+			return toon.Chapter{}, err
+		}
+		if len(chapters) == 0 {
+			return toon.Chapter{}, toon.ErrNotFound
+		}
+		return chapters[0], nil
+	}
+
+	var all []toon.Chapter
+
+	batchHandler := func(batch []toon.Chapter) error {
+		for _, ch := range batch {
+			progress.AddItem(ch)
+		}
+		all = append(all, batch...)
+
+		if onProgress != nil {
+			progress.PrepareForSend()
+			onProgress(*progress)
+			progress.CompleteBatch()
+		}
+		return nil
+	}
+
+	jobs := make([]job, total)
+	for i, id := range chapterIDs {
+		jobs[i] = job{chapterID: id}
+	}
+
+	cfg := workerpool.NewConfigOptimal(total, -1)
+	pool := workerpool.NewPool(ctx, cfg, workerFunc, batchHandler)
+
+	pool.SetErrorHandler(func(err error) {
+		if !errors.Is(err, toon.ErrNotFound) {
+			zap.L().Error("DownloadSource: chapter download error", zap.Error(err))
+		}
+	})
+
+	if err := pool.Process(jobs); err != nil {
+		return nil, fmt.Errorf("api.Registry.DownloadSource: %w", err)
+	}
+
+	if len(all) == 0 {
+		return nil, toon.ErrNotFound
+	}
+
+	return all, nil
 }
 
 // -----------------------------------------------------------------------

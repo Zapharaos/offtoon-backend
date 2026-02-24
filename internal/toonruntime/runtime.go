@@ -151,10 +151,6 @@ func (rt *RuntimeToon) run() {
 // handleDataChange handles a data change
 func (rt *RuntimeToon) handleDataChange(change dataChange) {
 	switch change.Reason {
-	case DataTypeCreated:
-		rt.handleDataChangeCreated(change)
-	case DataTypeUpdated:
-		rt.handleDataChangeUpdated(change)
 	case DataTypeCompleted:
 		rt.handleDataChangeCompleted(change)
 	case DataTypeFailed:

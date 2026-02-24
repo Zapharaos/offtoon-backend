@@ -9,18 +9,14 @@ import (
 type DataType uint8
 type DataChangeReason uint8
 
-// TODO : add/remove datatypes + handle them
 const (
-	DataTypeToon DataType = iota
-	DataTypeChapter
+	DataTypeChapter DataType = iota
 )
 
 const (
-	DataTypeCreated DataChangeReason = iota
-	DataTypeUpdated
+	DataTypeProgress DataChangeReason = iota
 	DataTypeCompleted
 	DataTypeFailed
-	DataTypeProgress
 )
 
 type dataChange struct {
@@ -30,37 +26,11 @@ type dataChange struct {
 	Progress wsruntime.Progress // Only used when working with batches
 }
 
-// handleDataChangeCreated handles the creation of data
-func (rt *RuntimeToon) handleDataChangeCreated(change dataChange) {
-	// TODO
-	switch change.Type {
-	case DataTypeToon:
-		rt.broadcastPacket(NewPacketInit())
-		break
-	default:
-		break
-	}
-}
-
-// handleDataChangeUpdated handles the update of data
-func (rt *RuntimeToon) handleDataChangeUpdated(change dataChange) {
-	// TODO
-	switch change.Type {
-	case DataTypeToon:
-		rt.broadcastPacket(NewPacketInit())
-		break
-	default:
-		break
-	}
-}
-
 // handleDataChangeCompleted handles the data completion
 func (rt *RuntimeToon) handleDataChangeCompleted(change dataChange) {
-	// TODO
 	switch change.Type {
-	case DataTypeToon:
-		rt.broadcastPacket(NewPacketInit())
-		break
+	case DataTypeChapter:
+		rt.broadcastPacket(NewPacketCompleted(change.Progress.Total))
 	default:
 		break
 	}
@@ -85,11 +55,9 @@ func (rt *RuntimeToon) handleDataChangeFailed(change dataChange) {
 
 // handleDataChangeProgress handles batch progress updates
 func (rt *RuntimeToon) handleDataChangeProgress(change dataChange) {
-	// TODO
 	switch change.Type {
-	case DataTypeToon:
-		rt.broadcastPacket(NewPacketInit())
-		break
+	case DataTypeChapter:
+		rt.broadcastPacket(NewPacketProgress(change.Progress))
 	default:
 		// Unknown data type for progress, ignore
 		return
