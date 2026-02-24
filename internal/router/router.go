@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Zapharaos/offtoon-backend/internal/handlers"
+	"github.com/Zapharaos/offtoon-backend/internal/toonruntime"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -18,7 +19,7 @@ type Router struct {
 	handler *handlers.Handler
 }
 
-func New( /*toonHandler *toonruntime.Handler*/ ) *Router {
+func New(toonHandler *toonruntime.Handler) *Router {
 	r := chi.NewRouter()
 
 	// A good base middleware stack
@@ -50,7 +51,7 @@ func New( /*toonHandler *toonruntime.Handler*/ ) *Router {
 
 	router := &Router{
 		Router:  r,
-		handler: handlers.NewHandler( /*toonHandler*/ ),
+		handler: handlers.NewHandler(toonHandler),
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {

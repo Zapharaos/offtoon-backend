@@ -11,6 +11,7 @@ import (
 
 	"github.com/Zapharaos/offtoon-backend/internal/app"
 	"github.com/Zapharaos/offtoon-backend/internal/router"
+	"github.com/Zapharaos/offtoon-backend/internal/toonruntime"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -40,9 +41,8 @@ func main() {
 	app.Init(Version, BuildDate)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	_ = ctx
-	//toonHandler := toonruntime.NewHandler(ctx)
-	r := router.New( /*toonHandler*/ )
+	toonHandler := toonruntime.NewHandler(ctx)
+	r := router.New(toonHandler)
 
 	// Get server configuration from config
 	host := viper.GetString("server.host")
@@ -81,7 +81,7 @@ func main() {
 		zap.L().Fatal("Server shutdown failed", zap.Error(err))
 	}
 
-	//toonHandler.Shutdown()
+	toonHandler.Shutdown()
 
 	zap.L().Info("Server shutdown")
 }
