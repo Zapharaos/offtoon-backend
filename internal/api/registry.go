@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
+	"github.com/Zapharaos/offtoon-backend/pkg/workerpool"
 	"go.uber.org/zap"
 )
 
@@ -26,7 +27,7 @@ func NewRegistry() *Registry {
 	return &Registry{clients: make(map[string]Client)}
 }
 
-// Register adds a client.  Panics if client is nil or its Name() is empty.
+// Register adds a client. Panics if client is nil or its Name() is empty.
 // Registering the same name twice overwrites the previous entry with a warning.
 func (r *Registry) Register(c Client) {
 	if c == nil {
@@ -105,6 +106,80 @@ func (r *Registry) Search(ctx context.Context, query string) ([]toon.SearchResul
 	return results, nil
 }
 
+// SearchSources fans the query out to the requested sources only, using a
+// worker pool so each source is queried concurrently.
+// customURLs maps a Source to a single extra base URL that is prepended to
+// that client's normal URL list for this request only.
+//
+// Unknown sources are skipped with a warning.
+// Sources returning toon.ErrNotFound are silently skipped.
+// Real errors are logged and skipped (best-effort).
+// Returns an empty slice (not an error) when nothing is found anywhere.
+func (r *Registry) SearchSources(ctx context.Context, query string, sources []Source, customURLs map[Source]string) ([]toon.SearchResult, error) {
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("api.Registry.SearchSources: no sources requested")
+	}
+
+	// Resolve sources to concrete clients up-front, skip unknowns.
+	type searchJob struct {
+		client   Client
+		extraURL string
+	}
+
+	jobs := make([]searchJob, 0, len(sources))
+	for _, src := range sources {
+		c, err := r.Client(string(src))
+		if err != nil {
+			zap.L().Warn("SearchSources: unknown source, skipping",
+				zap.String("source", string(src)))
+			continue
+		}
+		jobs = append(jobs, searchJob{client: c, extraURL: customURLs[src]})
+	}
+
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("api.Registry.SearchSources: none of the requested sources are registered")
+	}
+
+	var all []toon.SearchResult
+
+	// Worker function: process a single inventory item
+	workerFunc := func(ctx context.Context, job searchJob) ([]toon.SearchResult, error) {
+		var extraURLs []string
+		if job.extraURL != "" {
+			extraURLs = []string{job.extraURL}
+		}
+		results, err := job.client.SearchWithExtraURLs(ctx, query, extraURLs)
+		if err != nil {
+			if errors.Is(err, toon.ErrNotFound) {
+				return nil, nil // not found is not an error
+			}
+			return nil, err
+		}
+		return results, nil
+	}
+
+	pool := workerpool.NewPool(ctx, workerpool.NewConfigOptimal(len(jobs), -1), workerFunc, nil)
+
+	// Collect individual results as they arrive from each source.
+	pool.SetResultHandler(func(results []toon.SearchResult) error {
+		all = append(all, results...)
+		return nil
+	})
+
+	// Non-fatal: log errors from individual sources but keep going.
+	pool.SetErrorHandler(func(err error) {
+		zap.L().Error("SearchSources: source error", zap.Error(err))
+	})
+
+	if err := pool.Process(jobs); err != nil {
+		// Only a hard error (context cancelled, result handler failure) reaches here.
+		return nil, fmt.Errorf("api.Registry.SearchSources: %w", err)
+	}
+
+	return all, nil
+}
+
 // Fetch retrieves full toon details from the client named by params.ClientName().
 //
 // Returns toon.ErrNotFound (unwrapped with errors.Is) when the toon could not
@@ -132,7 +207,7 @@ func (r *Registry) Download(ctx context.Context, params DownloadParams) ([]toon.
 // Internal helpers
 // -----------------------------------------------------------------------
 
-// snapshot returns a stable copy of the client map under a read lock.
+// snapshot returns a stable copy of the client slice under a read lock.
 func (r *Registry) snapshot() []Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

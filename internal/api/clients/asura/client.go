@@ -100,6 +100,17 @@ func (c *Client) Search(_ context.Context, _ string) ([]toon.SearchResult, error
 	return nil, toon.ErrNotFound
 }
 
+// SearchWithExtraURLs behaves like Search but prepends extraURLs to the
+// client's configured URL list for this call only.
+func (c *Client) SearchWithExtraURLs(ctx context.Context, query string, extraURLs []string) ([]toon.SearchResult, error) {
+	// Swap the BaseClient for a one-shot clone with the extra URLs prepended,
+	// then delegate to Search which uses c.TryURLs internally.
+	original := c.BaseClient
+	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
+	defer func() { c.BaseClient = original }()
+	return c.Search(ctx, query)
+}
+
 // Fetch returns the full Toon details for the given source-specific params.
 func (c *Client) Fetch(_ context.Context, params api.FetchParams) (*toon.Toon, error) {
 	if _, ok := params.(FetchParams); !ok {

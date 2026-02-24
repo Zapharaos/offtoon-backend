@@ -55,10 +55,8 @@ func New(toonHandler *toonruntime.Handler, registry *api.Registry) *Router {
 		handler: handlers.NewHandler(toonHandler, registry),
 	}
 
-	// TODO : allow custom URL for API
-
 	r.Route("/api/v1", func(r chi.Router) {
-
+		r.Post("/search", router.handler.Search)
 	})
 
 	return router

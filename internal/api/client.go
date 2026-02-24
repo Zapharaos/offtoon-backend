@@ -52,6 +52,12 @@ type Client interface {
 	// Returns (nil, toon.ErrNotFound) when nothing was found across all URLs.
 	Search(ctx context.Context, query string) ([]toon.SearchResult, error)
 
+	// SearchWithExtraURLs behaves like Search but prepends extraURLs to the
+	// client's configured URL list for this call only.  Implementations must
+	// delegate to BaseClient.WithExtraURLs so the caller never needs to know
+	// the concrete type.
+	SearchWithExtraURLs(ctx context.Context, query string, extraURLs []string) ([]toon.SearchResult, error)
+
 	// Fetch returns the full Toon details for the given source-specific params.
 	// Returns (nil, toon.ErrNotFound) when the toon was not found on any URL.
 	Fetch(ctx context.Context, params FetchParams) (*toon.Toon, error)
