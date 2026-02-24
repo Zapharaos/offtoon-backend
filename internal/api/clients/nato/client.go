@@ -122,6 +122,15 @@ func (c *Client) Fetch(_ context.Context, params api.FetchParams) (*toon.Toon, e
 	return nil, toon.ErrNotFound
 }
 
+// FetchWithExtraURLs behaves like Fetch but prepends extraURLs to the
+// client's configured URL list for this call only.
+func (c *Client) FetchWithExtraURLs(ctx context.Context, slug string, extraURLs []string) (*toon.Toon, error) {
+	original := c.BaseClient
+	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
+	defer func() { c.BaseClient = original }()
+	return c.Fetch(ctx, FetchParams{Slug: slug})
+}
+
 // Download returns the chapters (with pages) for the given source-specific params.
 func (c *Client) Download(_ context.Context, params api.DownloadParams) ([]toon.Chapter, error) {
 	if _, ok := params.(DownloadParams); !ok {

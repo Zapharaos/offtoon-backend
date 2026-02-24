@@ -70,6 +70,17 @@ func (req *searchRequest) customURLMap() map[api.Source]string {
 }
 
 // Search handles POST /api/v1/search
+//
+//	@Summary		Search for toons
+//	@Description	Searches for toons matching the input query across the specified API sources. Supports optional custom base URLs per source.
+//	@Tags			toon
+//	@Accept			json
+//	@Produce		json
+//	@Param			body	body		searchRequest				true	"Search request"
+//	@Success		200		{array}		toon.SearchResult
+//	@Failure		400		{object}	render.ErrorResponse	"Invalid request body or parameters"
+//	@Failure		500		{object}	render.ErrorResponse	"Internal server error"
+//	@Router			/api/v1/search [post]
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	var req searchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

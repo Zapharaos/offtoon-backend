@@ -192,6 +192,19 @@ func (r *Registry) Fetch(ctx context.Context, params FetchParams) (*toon.Toon, e
 	return c.Fetch(ctx, params)
 }
 
+// FetchSource retrieves full toon details from the client identified by source,
+// using slug as the toon identifier. extraURLs are prepended to the client's
+// configured URL list for this call only (first one that succeeds wins).
+//
+// Returns toon.ErrNotFound when the toon could not be found on any URL.
+func (r *Registry) FetchSource(ctx context.Context, source Source, slug string, extraURLs []string) (*toon.Toon, error) {
+	c, err := r.Client(string(source))
+	if err != nil {
+		return nil, fmt.Errorf("api.Registry.FetchSource: %w", err)
+	}
+	return c.FetchWithExtraURLs(ctx, slug, extraURLs)
+}
+
 // Download retrieves chapters from the client named by params.ClientName().
 //
 // Returns toon.ErrNotFound when nothing was found on any URL.

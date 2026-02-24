@@ -57,6 +57,7 @@ func New(toonHandler *toonruntime.Handler, registry *api.Registry) *Router {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/search", router.handler.Search)
+		r.Post("/fetch", router.handler.Fetch)
 	})
 
 	return router
