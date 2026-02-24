@@ -7,6 +7,9 @@
 *.dll
 *.so
 *.dylib
+/bin
+/tmp
+/docs
 
 # Test binary, built with `go test -c`
 *.test
@@ -27,6 +30,11 @@ go.work.sum
 # env file
 .env
 
+# Prod
+.env.prod
+config.prod.yml
+docker-compose.prod.yml
+
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/

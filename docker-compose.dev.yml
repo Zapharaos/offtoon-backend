@@ -1,0 +1,16 @@
+services:
+
+  app:
+    build:
+      context: .
+    container_name: offtoon-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    volumes:
+      - ./logs:/root/logs
+      - ./config:/root/config
+    env_file:
+      - .env
+    environment:
+      - APP_ENV=${APP_ENV:-}

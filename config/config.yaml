@@ -1,0 +1,102 @@
+# Server configuration
+server:
+  # Specify the server host
+  # Default value: "127.0.0.1"
+  host: ""
+
+  # Specify the server port
+  # Default value: 3000
+  port: 3000
+
+logger:
+  # Specify the logger configuration
+  # Default value: "false"
+  production: false
+
+  # Specify the logger level
+  # Default value: "info"
+  level: debug
+
+  # Lumberjack log rotation configuration
+  rotation:
+    # Specify the log file path
+    # Default value: "logs/offtoon.log"
+    filename: "logs/offtoon.log"
+
+    # Specify the maximum size of the log file before rotation (in megabytes)
+    # Default value: 10
+    max_size: 10
+
+    # Specify the maximum number of old log files to retain
+    # Default value: 5
+    max_backups: 5
+
+    # Specify the maximum number of days to retain old log files
+    # Default value: 30
+    max_age: 30
+
+    # Specify if rotated log files should be compressed
+    # Default value: true
+    compress: true
+
+# Specify the timezone
+# Default value: "Europe/Paris"
+timezone: 'Europe/Paris'
+
+# CORS configuration
+cors:
+  # Enable or disable CORS
+  # Default value: true
+  enabled: true
+
+  # Specify allowed origins for CORS
+  # Default value: ["https://*", "http://*"]
+  allowed_origins:
+    - "https://*"
+    - "http://*"
+
+  # Specify allowed methods for CORS
+  # Default value: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+  allowed_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "DELETE"
+    - "OPTIONS"
+
+  # Specify allowed headers for CORS
+  # Default value: ["Accept", "Authorization", "Content-Type", "X-CSRF-Token"]
+  allowed_headers:
+    - "Accept"
+    - "Authorization"
+    - "Content-Type"
+    - "X-CSRF-Token"
+
+  # Allow credentials
+  # Default value: false
+  allow_credentials: false
+
+  # Maximum age in seconds
+  # Default value: 300
+  max_age: 300
+
+# Websockets
+websocket:
+
+  client:
+
+    # Time allowed to read the next pong message from the peer.
+    # Default value: 60 seconds
+    pong_wait: 60
+
+    # Send pings to peer with this period. Must be less than pongWait.
+    # Default value: 60 seconds (90% of pong_wait)
+    ping_period: 54
+
+    # Buffer size for the send channel to prevent blocking while allowing some buffering
+    # Default value: 64
+    send_channel_buffer_size: 64
+
+    # Maximum consecutive send failures before considering the client disconnected
+    # Default value: 10
+    max_consecutive_send_failures: 10
