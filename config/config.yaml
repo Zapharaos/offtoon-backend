@@ -100,3 +100,49 @@ websocket:
     # Maximum consecutive send failures before considering the client disconnected
     # Default value: 10
     max_consecutive_send_failures: 10
+
+# API clients configuration
+clients:
+
+  asura:
+    urls:
+      - "https://asuracomic.net"
+    throttle:
+      # Random delay range between requests (milliseconds)
+      delay_min_ms: 800
+      delay_max_ms: 2000
+      # Sliding-window rate limit
+      max_requests: 8
+      window_seconds: 60
+      # Retry / backoff
+      max_attempts: 3
+      initial_backoff_ms: 1000
+      max_backoff_ms: 30000
+      backoff_multiplier: 2.0
+      # Adaptive throttling
+      baseline_response_time_ms: 400
+      slow_threshold_multiplier: 3.0
+      adaptive_enabled: true
+
+  nato:
+    urls:
+      - "https://natomanga.com"
+      - "https://nelomanga.com"
+      - "https://mangakakalot.gg"
+      - "https://manganato.gg"
+    throttle:
+      # Random delay range between requests (milliseconds)
+      delay_min_ms: 600
+      delay_max_ms: 1800
+      # Sliding-window rate limit
+      max_requests: 10
+      window_seconds: 60
+      # Retry / backoff
+      max_attempts: 3
+      initial_backoff_ms: 1000
+      max_backoff_ms: 30000
+      backoff_multiplier: 2.0
+      # Adaptive throttling
+      baseline_response_time_ms: 350
+      slow_threshold_multiplier: 3.0
+      adaptive_enabled: true

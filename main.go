@@ -40,9 +40,14 @@ var (
 func main() {
 	app.Init(Version, BuildDate)
 
+	registry, err := app.SetupRegistry()
+	if err != nil {
+		zap.L().Fatal("Failed to initialize API registry", zap.Error(err))
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	toonHandler := toonruntime.NewHandler(ctx)
-	r := router.New(toonHandler)
+	r := router.New(toonHandler, registry)
 
 	// Get server configuration from config
 	host := viper.GetString("server.host")
