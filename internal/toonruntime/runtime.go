@@ -166,8 +166,6 @@ func (rt *RuntimeToon) handleDataChange(change dataChange) {
 func (rt *RuntimeToon) handleClientConnect(client Client) {
 	rt.registerClient(client)
 
-	// TODO : prepare packet with current data
-
 	// Send initial packet with toon infos
 	client.SendPacket(NewPacketInit())
 }
