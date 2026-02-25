@@ -76,6 +76,22 @@ func (c *Client) fetchFromURL(ctx context.Context, baseURL, slug string) (*toon.
 // -----------------------------------------------------------------------
 
 // parseFetchPage parses the series detail page HTML into a toon.Toon.
+//
+// Field extraction strategy (all semantic, no CSS class guessing):
+//
+//   - Title:         <span class="text-xl font-bold">
+//   - Cover:         <img alt="poster">
+//   - Description:   <span class="font-medium text-sm text-[#A2A2A2]"> → <p>
+//     text nodes after the first <br/> are the synopsis;
+//     text inside <strong><em> before the <br/> is the note.
+//   - Meta blocks:   <div> with two <h3> children where the first h3 has
+//     class "text-[#D9D9D9]" (label) and the second is the value.
+//     Labels: Author, Artist, Serialization, Updated On.
+//   - Status/Type:   same two-h3 pattern but label h3 has "text-[#A2A2A2]"
+//     and no "font-medium" (distinguishes them from meta blocks).
+//   - Genres:        <button> direct children of the div that immediately
+//     follows a <h3> whose text is "Genres".
+//   - Chapters:      custom <asura_fetch_response_chapters> elements.
 func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 	doc, err := html.Parse(strings.NewReader(string(body)))
 	if err != nil {
@@ -98,39 +114,75 @@ func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 					t.Title = strings.TrimSpace(nodeText(n))
 				}
 				// Description: <span class="font-medium text-sm text-[#A2A2A2]">
-				if hasClass(n, "font-medium") && hasClass(n, "text-sm") && t.Description == "" {
-					t.Description = strings.TrimSpace(nodeText(n))
+				// Must have all three classes to avoid matching other spans.
+				if hasClass(n, "font-medium") && hasClass(n, "text-sm") &&
+					hasClass(n, "text-[#A2A2A2]") && t.Description == "" {
+					t.Note, t.Description = parseDescriptionSpan(n)
+				}
+				// Rating: <span class="ml-1 text-xs">9.5</span>
+				// The span is a direct sibling of star-icon <div>s inside the rating block.
+				// We identify it as the only span whose sole text child is a float in [0,10]
+				// and whose previous element siblings are all <div>s.
+				if t.Rating == 0 {
+					if r, ok := extractRatingSpan(n); ok {
+						t.Rating = r
+					}
 				}
 
 			case "img":
-				// Cover poster: <img alt="poster" ...>
+				// Cover: <img alt="poster">
 				if getAttr(n, "alt") == "poster" && t.CoverURL == "" {
 					t.CoverURL = getAttr(n, "src")
 				}
 
 			case "div":
-				// Author/Artist metadata blocks:
-				// <div><h3 class="text-[#D9D9D9] font-medium text-sm">Author</h3>
-				//       <h3 class="text-[#A2A2A2] text-sm">I Stepped On Lego</h3></div>
-				if isMetaBlock(n) {
-					label, value := extractMetaBlock(n)
+				// Meta blocks: two direct h3 children, label h3 has text-[#D9D9D9] font-medium text-sm.
+				if label, value := extractD9MetaBlock(n); label != "" {
 					switch label {
 					case "Author":
 						if t.Author == "" {
 							t.Author = value
 						}
+					case "Artist":
+						if t.Artist == "" {
+							t.Artist = value
+						}
+					case "Serialization":
+						if t.Serialization == "" && value != "_" {
+							t.Serialization = value
+						}
+					case "Updated On":
+						if t.UpdatedOn == "" {
+							t.UpdatedOn = value
+						}
+					}
+				}
+
+				// Status/Type blocks: two direct h3 children, label h3 has text-[#A2A2A2] text-sm
+				// but NOT font-medium (that distinguishes them from the description span's context).
+				if label, value := extractA2MetaBlock(n); label != "" {
+					switch label {
+					case "Status":
+						if t.Status == "" {
+							t.Status = value
+						}
+					case "Type":
+						if t.Type == "" {
+							t.Type = value
+						}
+					}
+				}
+
+				// Genres: div following a <h3> whose text is "Genres",
+				// containing <button> direct children.
+				if t.Genres == nil {
+					if genres := extractGenresFromDiv(n); len(genres) > 0 {
+						t.Genres = genres
 					}
 				}
 
 			case "asura_fetch_response_chapters":
-				// Chapter rows: <asura_fetch_response_chapters href="{slug}/chapter/{number}">
-				href := getAttr(n, "href")
-				if isChapterHref(href) {
-					ch := parseChapterEntry(n, href, sourceURL)
-					if ch != nil {
-						t.Chapters = append(t.Chapters, *ch)
-					}
-				}
+				// legacy placeholder — no longer used
 			}
 		}
 
@@ -140,6 +192,8 @@ func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 	}
 	walk(doc)
 
+	t.Chapters = extractChapters(doc, sourceURL)
+
 	if t.Title == "" {
 		return nil, fmt.Errorf("%s: could not extract title from page", Name)
 	}
@@ -147,25 +201,171 @@ func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 	return t, nil
 }
 
-// isMetaBlock returns true when the div contains exactly two h3 children
-// where the first has the label style and the second has the value style.
-func isMetaBlock(n *html.Node) bool {
-	h3s := childH3s(n)
+// extractD9MetaBlock extracts (label, value) from a <div> whose two direct
+// <h3> children have the pattern:
+//
+//	<h3 class="text-[#D9D9D9] font-medium text-sm">Label</h3>
+//	<h3 class="text-[#A2A2A2] text-sm">Value</h3>
+func extractD9MetaBlock(n *html.Node) (label, value string) {
+	h3s := directChildH3s(n)
 	if len(h3s) < 2 {
-		return false
+		return "", ""
 	}
-	return hasClass(h3s[0], "text-[#D9D9D9]") && hasClass(h3s[1], "text-[#A2A2A2]")
-}
-
-func extractMetaBlock(n *html.Node) (label, value string) {
-	h3s := childH3s(n)
-	if len(h3s) < 2 {
+	if !hasClass(h3s[0], "text-[#D9D9D9]") || !hasClass(h3s[0], "font-medium") || !hasClass(h3s[0], "text-sm") {
 		return "", ""
 	}
 	return strings.TrimSpace(nodeText(h3s[0])), strings.TrimSpace(nodeText(h3s[1]))
 }
 
-func childH3s(n *html.Node) []*html.Node {
+// extractA2MetaBlock extracts (label, value) from a <div> whose two direct
+// <h3> children have the pattern:
+//
+//	<h3 class="text-sm text-[#A2A2A2]">Label</h3>
+//	<h3 class="text-sm ...">Value</h3>
+//
+// The label h3 must NOT have font-medium (to avoid matching description spans).
+func extractA2MetaBlock(n *html.Node) (label, value string) {
+	h3s := directChildH3s(n)
+	if len(h3s) < 2 {
+		return "", ""
+	}
+	lbl := h3s[0]
+	if !hasClass(lbl, "text-[#A2A2A2]") || !hasClass(lbl, "text-sm") || hasClass(lbl, "font-medium") {
+		return "", ""
+	}
+	return strings.TrimSpace(nodeText(lbl)), strings.TrimSpace(nodeText(h3s[1]))
+}
+
+// extractGenresFromDiv returns genre names when n is a div that is the sibling
+// immediately following a <h3> whose text content is "Genres", and n contains
+// <button> direct children.
+func extractGenresFromDiv(n *html.Node) []string {
+	// Check that the previous sibling (skipping text nodes) is <h3>Genres</h3>.
+	prev := n.PrevSibling
+	for prev != nil && prev.Type == html.TextNode {
+		prev = prev.PrevSibling
+	}
+	if prev == nil || prev.Type != html.ElementNode || prev.Data != "h3" {
+		return nil
+	}
+	if strings.TrimSpace(nodeText(prev)) != "Genres" {
+		return nil
+	}
+	// Collect text from direct <button> children.
+	var genres []string
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "button" {
+			if g := strings.TrimSpace(nodeText(c)); g != "" {
+				genres = append(genres, g)
+			}
+		}
+	}
+	return genres
+}
+
+// parseDescriptionSpan splits the description span into two parts:
+//
+//   - note: the text inside <strong><em>...</em></strong> at the top of the
+//     paragraph — this is typically a studio/publisher blurb.
+//   - desc: all remaining text content of the paragraph (text nodes and inline
+//     elements that are NOT the strong/em note), trimmed.
+//
+// Structure:
+//
+//	<span class="font-medium text-sm ...">
+//	  <p>
+//	    <strong><em>studio note</em></strong>
+//	    <br/>
+//	    synopsis text…
+//	  </p>
+//	</span>
+func parseDescriptionSpan(span *html.Node) (note, desc string) {
+	// Find the <p> child of the span.
+	var p *html.Node
+	for c := span.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "p" {
+			p = c
+			break
+		}
+	}
+	if p == nil {
+		// No <p> — fall back to full text.
+		return "", strings.TrimSpace(nodeText(span))
+	}
+
+	var noteParts, descParts []string
+	noteFound := false
+
+	for c := p.FirstChild; c != nil; c = c.NextSibling {
+		switch {
+		case c.Type == html.ElementNode && c.Data == "strong" && !noteFound:
+			// The first <strong> (which wraps <em>) is the studio note.
+			noteParts = append(noteParts, strings.TrimSpace(nodeText(c)))
+			noteFound = true
+
+		case c.Type == html.ElementNode && c.Data == "br":
+			// Skip <br> separators.
+
+		case c.Type == html.TextNode:
+			t := strings.TrimSpace(c.Data)
+			if t != "" {
+				descParts = append(descParts, t)
+			}
+
+		default:
+			// Any other inline element after the note is part of the synopsis.
+			t := strings.TrimSpace(nodeText(c))
+			if t != "" {
+				descParts = append(descParts, t)
+			}
+		}
+	}
+
+	return strings.Join(noteParts, " "), strings.Join(descParts, " ")
+}
+
+// extractRatingSpan returns the rating value if n is the rating <span>.
+//
+// The rating span has two stable properties:
+//  1. Its sole text child is a decimal number in the range [0, 10].
+//  2. Every previous element sibling is a <div> (the star icon wrappers).
+//
+// This combination is unique to the rating span and requires no CSS classes.
+func extractRatingSpan(n *html.Node) (float64, bool) {
+	// Must have exactly one child that is a non-empty text node.
+	child := n.FirstChild
+	if child == nil || child.NextSibling != nil || child.Type != html.TextNode {
+		return 0, false
+	}
+	val, err := strconv.ParseFloat(strings.TrimSpace(child.Data), 64)
+	if err != nil || val < 0 || val > 10 {
+		return 0, false
+	}
+	// All previous element siblings must be <div> nodes (star icon wrappers).
+	for sib := n.PrevSibling; sib != nil; sib = sib.PrevSibling {
+		if sib.Type == html.TextNode {
+			continue // skip whitespace text nodes
+		}
+		if sib.Type != html.ElementNode || sib.Data != "div" {
+			return 0, false
+		}
+	}
+	// Must have at least one <div> sibling (i.e. not just any lone span).
+	hasDivSibling := false
+	for sib := n.PrevSibling; sib != nil; sib = sib.PrevSibling {
+		if sib.Type == html.ElementNode && sib.Data == "div" {
+			hasDivSibling = true
+			break
+		}
+	}
+	if !hasDivSibling {
+		return 0, false
+	}
+	return val, true
+}
+
+// directChildH3s returns the direct <h3> element children of n (not deeper descendants).
+func directChildH3s(n *html.Node) []*html.Node {
 	var result []*html.Node
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type == html.ElementNode && c.Data == "h3" {
@@ -180,10 +380,98 @@ func isChapterHref(href string) bool {
 	return strings.Contains(href, "/chapter/")
 }
 
-// parseChapterEntry extracts chapter data from asura_fetch_response_chapters chapter list <asura_fetch_response_chapters> node.
-// href format: "revenge-of-the-iron-blooded-sword-hound-cd494674/chapter/151"
-func parseChapterEntry(_ *html.Node, href, baseSourceURL string) *toon.Chapter {
-	// Extract chapter number from the last path segment.
+// extractChapters locates the chapter list container and collects all chapters
+// from it, excluding the "First Chapter" / "New Chapter" shortcut anchors.
+//
+// Structural anchor (semantic, no CSS classes):
+//
+//	The page has an <input> whose placeholder starts with "Search Chapter".
+//	That input's next sibling <div> is the scrollable chapter list container.
+//	Every direct child <div> of that container holds one chapter entry via a
+//	nested <a href="{slug}/chapter/{number}"> anchor.
+//
+// Each chapter anchor contains:
+//   - A <h3> whose text starts with "Chapter" — provides the chapter number.
+//   - A second <h3> — provides the release date.
+func extractChapters(doc *html.Node, sourceURL string) []toon.Chapter {
+	container := findChapterListContainer(doc)
+	if container == nil {
+		return nil
+	}
+
+	origin := extractOrigin(sourceURL)
+	var chapters []toon.Chapter
+
+	// Each direct child <div> of the container is one chapter entry.
+	for entry := container.FirstChild; entry != nil; entry = entry.NextSibling {
+		if entry.Type != html.ElementNode || entry.Data != "div" {
+			continue
+		}
+		// Find the <a href="...chapter/..."> inside the entry div.
+		var anchor *html.Node
+		for c := entry.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode && c.Data == "a" && isChapterHref(getAttr(c, "href")) {
+				anchor = c
+				break
+			}
+		}
+		if anchor == nil {
+			continue
+		}
+		if ch := parseChapterAnchor(anchor, origin); ch != nil {
+			chapters = append(chapters, *ch)
+		}
+	}
+
+	return chapters
+}
+
+// findChapterListContainer returns the <div> that contains the full chapter
+// list by finding the <input placeholder="Search Chapter..."> and returning
+// its next sibling <div>.
+func findChapterListContainer(doc *html.Node) *html.Node {
+	var input *html.Node
+	var findInput func(*html.Node)
+	findInput = func(n *html.Node) {
+		if input != nil {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "input" {
+			if strings.HasPrefix(getAttr(n, "placeholder"), "Search Chapter") {
+				input = n
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			findInput(c)
+		}
+	}
+	findInput(doc)
+	if input == nil {
+		return nil
+	}
+	// The input is inside a wrapper div; the chapter list container is the
+	// next sibling <div> of that wrapper div.
+	wrapper := input.Parent
+	if wrapper == nil {
+		return nil
+	}
+	for sib := wrapper.NextSibling; sib != nil; sib = sib.NextSibling {
+		if sib.Type == html.ElementNode && sib.Data == "div" {
+			return sib
+		}
+	}
+	return nil
+}
+
+// parseChapterAnchor extracts a toon.Chapter from a chapter list <a> node.
+//
+// The anchor contains:
+//   - A decorative <div> (purple bar) — ignored.
+//   - <h3> with text "Chapter N[title]" — chapter number and optional title.
+//   - <h3> with the release date string.
+func parseChapterAnchor(a *html.Node, origin string) *toon.Chapter {
+	href := getAttr(a, "href")
 	parts := strings.Split(strings.TrimRight(href, "/"), "/")
 	if len(parts) < 2 {
 		return nil
@@ -194,16 +482,19 @@ func parseChapterEntry(_ *html.Node, href, baseSourceURL string) *toon.Chapter {
 		return nil
 	}
 
-	// Build the canonical chapter URL from the source URL's host.
-	// href is relative (no leading slash), so prefix with the base URL origin.
-	origin := extractOrigin(baseSourceURL)
-	chURL := origin + "/" + href
+	// Collect direct <h3> children for number and date.
+	h3s := directChildH3s(a)
+	var date string
+	if len(h3s) >= 2 {
+		date = strings.TrimSpace(nodeText(h3s[1]))
+	}
 
 	return &toon.Chapter{
 		ID:     numStr,
 		Number: num,
 		Title:  fmt.Sprintf("Chapter %s", numStr),
-		URL:    chURL,
+		Date:   date,
+		URL:    origin + "/series/" + href,
 	}
 }
 

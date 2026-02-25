@@ -52,6 +52,8 @@ type Client interface {
 	// Returns (nil, toon.ErrNotFound) when nothing was found across all URLs.
 	Search(ctx context.Context, query string) ([]toon.SearchResult, error)
 
+	// TODO : is it secure ? is our server vulnerable to SSRF if we allow arbitrary URLs here ? maybe we should only allow URLs that match the client's configured URLs ? or at least validate that they look like the expected API endpoints for that client ?
+
 	// SearchWithExtraURLs behaves like Search but prepends extraURLs to the
 	// client's configured URL list for this call only.  Implementations must
 	// delegate to BaseClient.WithExtraURLs so the caller never needs to know
