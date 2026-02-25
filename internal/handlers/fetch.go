@@ -17,9 +17,6 @@ type fetchRequest struct {
 	// Source is the API client to use (e.g. "asura", "nato").
 	Source api.Source `json:"source"`
 
-	// URL is an optional custom base URL to try before the client's configured URLs.
-	URL string `json:"url,omitempty"`
-
 	// Slug is the source-specific toon slug (e.g. "0a59965f-some-toon-slug").
 	Slug string `json:"slug"`
 }
@@ -38,7 +35,7 @@ func (req *fetchRequest) validate() error {
 // Fetch handles POST /api/v1/fetch
 //
 //	@Summary		Fetch a toon
-//	@Description	Fetches the full details of a toon from a specific API source using the provided slug and optional custom base URL.
+//	@Description	Fetches the full details of a toon from a specific API source using the provided slug.
 //	@Tags			toon
 //	@Accept			json
 //	@Produce		json
@@ -60,12 +57,7 @@ func (h *Handler) Fetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var extraURLs []string
-	if strings.TrimSpace(req.URL) != "" {
-		extraURLs = []string{strings.TrimSpace(req.URL)}
-	}
-
-	result, err := h.reg.FetchSource(r.Context(), req.Source, strings.TrimSpace(req.Slug), extraURLs)
+	result, err := h.reg.FetchSource(r.Context(), req.Source, strings.TrimSpace(req.Slug))
 	if err != nil {
 		if errors.Is(err, toon.ErrNotFound) {
 			render.NotFound(w, r, fmt.Errorf("toon %q not found on source %q", req.Slug, req.Source))

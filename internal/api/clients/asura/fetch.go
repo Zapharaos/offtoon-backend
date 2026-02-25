@@ -13,6 +13,11 @@ import (
 	"golang.org/x/net/html"
 )
 
+// NewFetchParams builds the asura-specific FetchParams for the given slug.
+func (c *Client) NewFetchParams(slug string) api.FetchParams {
+	return FetchParams{Slug: slug}
+}
+
 // Fetch returns the full Toon details for the given source-specific params.
 func (c *Client) Fetch(ctx context.Context, params api.FetchParams) (*toon.Toon, error) {
 	fp, ok := params.(FetchParams)
@@ -551,13 +556,4 @@ func nodeText(n *html.Node) string {
 	}
 	walk(n)
 	return sb.String()
-}
-
-// FetchWithExtraURLs behaves like Fetch but prepends extraURLs to the
-// client's configured URL list for this call only.
-func (c *Client) FetchWithExtraURLs(ctx context.Context, slug string, extraURLs []string) (*toon.Toon, error) {
-	original := c.BaseClient
-	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
-	defer func() { c.BaseClient = original }()
-	return c.Fetch(ctx, FetchParams{Slug: slug})
 }

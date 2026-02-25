@@ -98,19 +98,15 @@ func (p DownloadParams) ClientName() string { return Name }
 // Interface implementation (stubs – real scraping logic to be added)
 // -----------------------------------------------------------------------
 
+// NewFetchParams builds the nato-specific FetchParams for the given slug.
+func (c *Client) NewFetchParams(slug string) api.FetchParams {
+	return FetchParams{Slug: slug}
+}
+
 // Search returns toons whose title matches query across all configured URLs.
 func (c *Client) Search(_ context.Context, _ string) ([]toon.SearchResult, error) {
 	// TODO: implement Nato search scraping
 	return nil, toon.ErrNotFound
-}
-
-// SearchWithExtraURLs behaves like Search but prepends extraURLs to the
-// client's configured URL list for this call only.
-func (c *Client) SearchWithExtraURLs(ctx context.Context, query string, extraURLs []string) ([]toon.SearchResult, error) {
-	original := c.BaseClient
-	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
-	defer func() { c.BaseClient = original }()
-	return c.Search(ctx, query)
 }
 
 // Fetch returns the full Toon details for the given source-specific params.
@@ -122,15 +118,6 @@ func (c *Client) Fetch(_ context.Context, params api.FetchParams) (*toon.Toon, e
 	return nil, toon.ErrNotFound
 }
 
-// FetchWithExtraURLs behaves like Fetch but prepends extraURLs to the
-// client's configured URL list for this call only.
-func (c *Client) FetchWithExtraURLs(ctx context.Context, slug string, extraURLs []string) (*toon.Toon, error) {
-	original := c.BaseClient
-	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
-	defer func() { c.BaseClient = original }()
-	return c.Fetch(ctx, FetchParams{Slug: slug})
-}
-
 // Download returns the chapters (with pages) for the given source-specific params.
 func (c *Client) Download(_ context.Context, params api.DownloadParams) ([]toon.Chapter, error) {
 	if _, ok := params.(DownloadParams); !ok {
@@ -140,11 +127,7 @@ func (c *Client) Download(_ context.Context, params api.DownloadParams) ([]toon.
 	return nil, toon.ErrNotFound
 }
 
-// DownloadWithExtraURLs behaves like Download but prepends extraURLs to the
-// client's configured URL list for this call only.
-func (c *Client) DownloadWithExtraURLs(ctx context.Context, slug string, chapterIDs []string, extraURLs []string) ([]toon.Chapter, error) {
-	original := c.BaseClient
-	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
-	defer func() { c.BaseClient = original }()
-	return c.Download(ctx, DownloadParams{Slug: slug, ChapterIDs: chapterIDs})
+// NewDownloadParams builds the nato-specific DownloadParams for the given slug and chapter IDs.
+func (c *Client) NewDownloadParams(slug string, chapterIDs []string) api.DownloadParams {
+	return DownloadParams{Slug: slug, ChapterIDs: chapterIDs}
 }

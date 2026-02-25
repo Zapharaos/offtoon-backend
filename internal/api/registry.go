@@ -109,25 +109,18 @@ func (r *Registry) Search(ctx context.Context, query string) ([]toon.SearchResul
 
 // SearchSources fans the query out to the requested sources only, using a
 // worker pool so each source is queried concurrently.
-// customURLs maps a Source to a single extra base URL that is prepended to
-// that client's normal URL list for this request only.
 //
 // Unknown sources are skipped with a warning.
 // Sources returning toon.ErrNotFound are silently skipped.
 // Real errors are logged and skipped (best-effort).
 // Returns an empty slice (not an error) when nothing is found anywhere.
-func (r *Registry) SearchSources(ctx context.Context, query string, sources []Source, customURLs map[Source]string) ([]toon.SearchResult, error) {
+func (r *Registry) SearchSources(ctx context.Context, query string, sources []Source) ([]toon.SearchResult, error) {
 	if len(sources) == 0 {
 		return nil, fmt.Errorf("api.Registry.SearchSources: no sources requested")
 	}
 
 	// Resolve sources to concrete clients up-front, skip unknowns.
-	type searchJob struct {
-		client   Client
-		extraURL string
-	}
-
-	jobs := make([]searchJob, 0, len(sources))
+	clients := make([]Client, 0, len(sources))
 	for _, src := range sources {
 		c, err := r.Client(string(src))
 		if err != nil {
@@ -135,22 +128,17 @@ func (r *Registry) SearchSources(ctx context.Context, query string, sources []So
 				zap.String("source", string(src)))
 			continue
 		}
-		jobs = append(jobs, searchJob{client: c, extraURL: customURLs[src]})
+		clients = append(clients, c)
 	}
 
-	if len(jobs) == 0 {
+	if len(clients) == 0 {
 		return nil, fmt.Errorf("api.Registry.SearchSources: none of the requested sources are registered")
 	}
 
 	var all []toon.SearchResult
 
-	// Worker function: process a single inventory item
-	workerFunc := func(ctx context.Context, job searchJob) ([]toon.SearchResult, error) {
-		var extraURLs []string
-		if job.extraURL != "" {
-			extraURLs = []string{job.extraURL}
-		}
-		results, err := job.client.SearchWithExtraURLs(ctx, query, extraURLs)
+	workerFunc := func(ctx context.Context, c Client) ([]toon.SearchResult, error) {
+		results, err := c.Search(ctx, query)
 		if err != nil {
 			if errors.Is(err, toon.ErrNotFound) {
 				return nil, nil // not found is not an error
@@ -160,21 +148,18 @@ func (r *Registry) SearchSources(ctx context.Context, query string, sources []So
 		return results, nil
 	}
 
-	pool := workerpool.NewPool(ctx, workerpool.NewConfigOptimal(len(jobs), -1), workerFunc, nil)
+	pool := workerpool.NewPool(ctx, workerpool.NewConfigOptimal(len(clients), -1), workerFunc, nil)
 
-	// Collect individual results as they arrive from each source.
 	pool.SetResultHandler(func(results []toon.SearchResult) error {
 		all = append(all, results...)
 		return nil
 	})
 
-	// Non-fatal: log errors from individual sources but keep going.
 	pool.SetErrorHandler(func(err error) {
 		zap.L().Error("SearchSources: source error", zap.Error(err))
 	})
 
-	if err := pool.Process(jobs); err != nil {
-		// Only a hard error (context cancelled, result handler failure) reaches here.
+	if err := pool.Process(clients); err != nil {
 		return nil, fmt.Errorf("api.Registry.SearchSources: %w", err)
 	}
 
@@ -193,17 +178,16 @@ func (r *Registry) Fetch(ctx context.Context, params FetchParams) (*toon.Toon, e
 	return c.Fetch(ctx, params)
 }
 
-// FetchSource retrieves full toon details from the client identified by source,
-// using slug as the toon identifier. extraURLs are prepended to the client's
-// configured URL list for this call only (first one that succeeds wins).
+// FetchSource retrieves full toon details from the client identified by source
+// using slug as the toon identifier.
 //
 // Returns toon.ErrNotFound when the toon could not be found on any URL.
-func (r *Registry) FetchSource(ctx context.Context, source Source, slug string, extraURLs []string) (*toon.Toon, error) {
+func (r *Registry) FetchSource(ctx context.Context, source Source, slug string) (*toon.Toon, error) {
 	c, err := r.Client(string(source))
 	if err != nil {
 		return nil, fmt.Errorf("api.Registry.FetchSource: %w", err)
 	}
-	return c.FetchWithExtraURLs(ctx, slug, extraURLs)
+	return c.Fetch(ctx, c.NewFetchParams(slug))
 }
 
 // Download retrieves chapters from the client named by params.ClientName().
@@ -222,8 +206,8 @@ func (r *Registry) Download(ctx context.Context, params DownloadParams) ([]toon.
 // with the current wsruntime.Progress snapshot so the caller can push it to
 // connected WebSocket clients.
 //
-// source identifies the API client; extraURLs are prepended to its URL list.
-// slug is the toon slug; chapterIDs is the list of chapter IDs to download.
+// source identifies the API client; slug is the toon slug;
+// chapterIDs is the list of chapter IDs to download.
 // onProgress may be nil if progress notifications are not needed.
 //
 // Returns the full list of downloaded chapters or toon.ErrNotFound when none
@@ -233,7 +217,6 @@ func (r *Registry) DownloadSource(
 	source Source,
 	slug string,
 	chapterIDs []string,
-	extraURLs []string,
 	onProgress func(wsruntime.Progress),
 ) ([]toon.Chapter, error) {
 	c, err := r.Client(string(source))
@@ -253,7 +236,7 @@ func (r *Registry) DownloadSource(
 	}
 
 	workerFunc := func(ctx context.Context, j job) (toon.Chapter, error) {
-		chapters, err := c.DownloadWithExtraURLs(ctx, slug, []string{j.chapterID}, extraURLs)
+		chapters, err := c.Download(ctx, c.NewDownloadParams(slug, []string{j.chapterID}))
 		if err != nil {
 			return toon.Chapter{}, err
 		}

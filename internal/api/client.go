@@ -52,29 +52,17 @@ type Client interface {
 	// Returns (nil, toon.ErrNotFound) when nothing was found across all URLs.
 	Search(ctx context.Context, query string) ([]toon.SearchResult, error)
 
-	// TODO : is it secure ? is our server vulnerable to SSRF if we allow arbitrary URLs here ? maybe we should only allow URLs that match the client's configured URLs ? or at least validate that they look like the expected API endpoints for that client ?
-
-	// SearchWithExtraURLs behaves like Search but prepends extraURLs to the
-	// client's configured URL list for this call only.  Implementations must
-	// delegate to BaseClient.WithExtraURLs so the caller never needs to know
-	// the concrete type.
-	SearchWithExtraURLs(ctx context.Context, query string, extraURLs []string) ([]toon.SearchResult, error)
+	// NewFetchParams builds the source-specific FetchParams for the given slug.
+	NewFetchParams(slug string) FetchParams
 
 	// Fetch returns the full Toon details for the given source-specific params.
 	// Returns (nil, toon.ErrNotFound) when the toon was not found on any URL.
 	Fetch(ctx context.Context, params FetchParams) (*toon.Toon, error)
 
-	// FetchWithExtraURLs behaves like Fetch but prepends extraURLs to the
-	// client's configured URL list for this call only.
-	// The slug is the source-specific toon identifier.
-	FetchWithExtraURLs(ctx context.Context, slug string, extraURLs []string) (*toon.Toon, error)
+	// NewDownloadParams builds the source-specific DownloadParams for the given slug and chapter IDs.
+	NewDownloadParams(slug string, chapterIDs []string) DownloadParams
 
 	// Download returns the chapters (with pages) described by the source-specific params.
 	// Returns (nil, toon.ErrNotFound) when nothing was found on any URL.
 	Download(ctx context.Context, params DownloadParams) ([]toon.Chapter, error)
-
-	// DownloadWithExtraURLs behaves like Download but prepends extraURLs to the
-	// client's configured URL list for this call only.
-	// slug is the toon identifier; chapterIDs limits download to specific chapters.
-	DownloadWithExtraURLs(ctx context.Context, slug string, chapterIDs []string, extraURLs []string) ([]toon.Chapter, error)
 }

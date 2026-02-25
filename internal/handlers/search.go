@@ -19,11 +19,6 @@ type searchRequest struct {
 	// Valid values: "asura", "nato".
 	// Must contain at least one entry.
 	Sources []api.Source `json:"sources"`
-
-	// CustomURLs allows the caller to provide one extra base URL per source.
-	// Each entry is tried before the client's own configured URLs.
-	// At most one entry per source is accepted.
-	CustomURLs []api.CustomURL `json:"custom_urls,omitempty"`
 }
 
 // validate returns an error describing the first problem found, or nil.
@@ -46,37 +41,17 @@ func (req *searchRequest) validate() error {
 		seen[src] = struct{}{}
 	}
 
-	customPerSource := make(map[api.Source]int)
-	for i, cu := range req.CustomURLs {
-		if err := cu.Validate(); err != nil {
-			return fmt.Errorf("custom_urls[%d]: %w", i, err)
-		}
-		customPerSource[cu.Source]++
-		if customPerSource[cu.Source] > 1 {
-			return fmt.Errorf("custom_urls: only one custom URL is allowed per source, got multiple for %q", cu.Source)
-		}
-	}
-
 	return nil
-}
-
-// customURLMap converts the slice into a map keyed by source for O(1) lookup.
-func (req *searchRequest) customURLMap() map[api.Source]string {
-	m := make(map[api.Source]string, len(req.CustomURLs))
-	for _, cu := range req.CustomURLs {
-		m[cu.Source] = cu.URL
-	}
-	return m
 }
 
 // Search handles POST /api/v1/search
 //
 //	@Summary		Search for toons
-//	@Description	Searches for toons matching the input query across the specified API sources. Supports optional custom base URLs per source.
+//	@Description	Searches for toons matching the input query across the specified API sources.
 //	@Tags			toon
 //	@Accept			json
 //	@Produce		json
-//	@Param			body	body		searchRequest				true	"Search request"
+//	@Param			body	body		searchRequest			true	"Search request"
 //	@Success		200		{array}		toon.SearchResult
 //	@Failure		400		{object}	render.ErrorResponse	"Invalid request body or parameters"
 //	@Failure		500		{object}	render.ErrorResponse	"Internal server error"
@@ -93,7 +68,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := h.reg.SearchSources(r.Context(), strings.TrimSpace(req.Input), req.Sources, req.customURLMap())
+	results, err := h.reg.SearchSources(r.Context(), strings.TrimSpace(req.Input), req.Sources)
 	if err != nil {
 		render.Error(w, r, err, "search failed")
 		return

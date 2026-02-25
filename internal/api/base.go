@@ -48,25 +48,6 @@ func (b *BaseClient) URLs() []string { return b.urls }
 // Throttler exposes the underlying rate-limiter (useful for stats / reset).
 func (b *BaseClient) Throttler() *throttle.Throttler { return b.throttler }
 
-// WithExtraURLs returns a shallow clone of BaseClient whose URL list has
-// extra prepended in front of the original URLs. The throttler and HTTP
-// client are shared (not copied) so rate-limiting still applies globally.
-// Use this to inject per-request custom URLs without mutating the global client.
-func (b *BaseClient) WithExtraURLs(extra []string) *BaseClient {
-	if len(extra) == 0 {
-		return b
-	}
-	merged := make([]string, 0, len(extra)+len(b.urls))
-	merged = append(merged, extra...)
-	merged = append(merged, b.urls...)
-	return &BaseClient{
-		name:      b.name,
-		urls:      merged,
-		http:      b.http,
-		throttler: b.throttler,
-	}
-}
-
 // -----------------------------------------------------------------------
 // URL-fallback helpers
 // -----------------------------------------------------------------------

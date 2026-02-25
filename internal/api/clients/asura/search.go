@@ -45,15 +45,6 @@ func (c *Client) Search(ctx context.Context, query string) ([]toon.SearchResult,
 	return results, nil
 }
 
-// SearchWithExtraURLs behaves like Search but prepends extraURLs to the
-// client's configured URL list for this call only.
-func (c *Client) SearchWithExtraURLs(ctx context.Context, query string, extraURLs []string) ([]toon.SearchResult, error) {
-	original := c.BaseClient
-	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
-	defer func() { c.BaseClient = original }()
-	return c.Search(ctx, query)
-}
-
 // searchFromURL performs HTTP requests and HTML parsing for all pages of
 // results for a single base URL, accumulating results until no next page exists.
 func (c *Client) searchFromURL(ctx context.Context, baseURL, query string) ([]toon.SearchResult, error) {

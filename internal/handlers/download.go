@@ -18,9 +18,6 @@ type downloadRequest struct {
 	// Source is the API client to use (e.g. "asura", "nato").
 	Source api.Source `json:"source"`
 
-	// URL is an optional custom base URL to try before the client's configured URLs.
-	URL string `json:"url,omitempty"`
-
 	// Slug is the source-specific toon slug.
 	Slug string `json:"slug"`
 
@@ -84,22 +81,11 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var extraURLs []string
-	if strings.TrimSpace(req.URL) != "" {
-		extraURLs = []string{strings.TrimSpace(req.URL)}
-	}
-
-	// Create a placeholder toon so the runtime has something to attach to.
-	// The real chapter data arrives via progress packets as the download proceeds.
 	rt := h.trh.RunToon(toon.Toon{
-		Source:    string(req.Source),
-		SourceURL: req.URL,
+		Source: string(req.Source),
 	})
 
-	// Kick off the download in the background; the HTTP response returns
-	// immediately with the runtime ID for WebSocket subscription.
 	go func() {
-		// Detach from the HTTP request context so the download outlives it.
 		ctx := r.Context()
 
 		chapters, err := h.reg.DownloadSource(
@@ -107,7 +93,6 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			req.Source,
 			strings.TrimSpace(req.Slug),
 			req.ChapterIDs,
-			extraURLs,
 			func(progress wsruntime.Progress) {
 				h.trh.PushBatchProgress(rt.ID, toonruntime.DataTypeChapter, progress)
 			},

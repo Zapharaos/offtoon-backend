@@ -18,6 +18,11 @@ import (
 // Download
 // -----------------------------------------------------------------------
 
+// NewDownloadParams builds the asura-specific DownloadParams for the given slug and chapter IDs.
+func (c *Client) NewDownloadParams(slug string, chapterIDs []string) api.DownloadParams {
+	return DownloadParams{Slug: slug, ChapterIDs: chapterIDs}
+}
+
 // Download returns the chapters (with pages) for the given source-specific params.
 //
 // The chapter URL is constructed deterministically as:
@@ -301,17 +306,4 @@ func findMatchingBrace(s string) int {
 		}
 	}
 	return -1
-}
-
-// -----------------------------------------------------------------------
-// DownloadWithExtraURLs
-// -----------------------------------------------------------------------
-
-// DownloadWithExtraURLs behaves like Download but prepends extraURLs to the
-// client's configured URL list for this call only.
-func (c *Client) DownloadWithExtraURLs(ctx context.Context, slug string, chapterIDs []string, extraURLs []string) ([]toon.Chapter, error) {
-	original := c.BaseClient
-	c.BaseClient = c.BaseClient.WithExtraURLs(extraURLs)
-	defer func() { c.BaseClient = original }()
-	return c.Download(ctx, DownloadParams{Slug: slug, ChapterIDs: chapterIDs})
 }
