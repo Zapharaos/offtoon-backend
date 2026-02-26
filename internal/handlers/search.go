@@ -32,7 +32,7 @@ func (req *searchRequest) validate() error {
 
 	seen := make(map[api.Source]struct{}, len(req.Sources))
 	for _, src := range req.Sources {
-		if !src.Valid() {
+		if !api.ValidSource(src) {
 			return fmt.Errorf("unknown source %q", src)
 		}
 		if _, dup := seen[src]; dup {

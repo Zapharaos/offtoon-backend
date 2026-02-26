@@ -23,7 +23,7 @@ type fetchRequest struct {
 
 // validate returns an error describing the first problem found, or nil.
 func (req *fetchRequest) validate() error {
-	if !req.Source.Valid() {
+	if !api.ValidSource(req.Source) {
 		return fmt.Errorf("unknown source %q", req.Source)
 	}
 	if strings.TrimSpace(req.Slug) == "" {

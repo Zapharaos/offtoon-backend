@@ -12,7 +12,7 @@ func TestParseSearchPage(t *testing.T) {
 		t.Skip("search response fixture not found:", err)
 	}
 
-	results, err := parseSearchPage(body, "https://asuracomic.net")
+	results, _, err := parseSearchPage(body, "https://asuracomic.net")
 	if err != nil {
 		t.Fatalf("parseSearchPage returned error: %v", err)
 	}
@@ -23,8 +23,8 @@ func TestParseSearchPage(t *testing.T) {
 
 	t.Logf("Found %d results", len(results))
 	for i, r := range results {
-		t.Logf("  [%d] ID=%q Title=%q CoverURL=%v SourceURL=%q",
-			i+1, r.ID, r.Title, r.CoverURL != "", r.SourceURL)
+		t.Logf("  [%d] ID=%q Title=%q CoverURL=%v Status=%q LastChapter=%.1f Rating=%.1f SourceURL=%q",
+			i+1, r.ID, r.Title, r.CoverURL != "", r.Status, r.LastChapter, r.Rating, r.SourceURL)
 
 		if r.ID == "" {
 			t.Error("result has empty ID (slug)")
@@ -40,6 +40,15 @@ func TestParseSearchPage(t *testing.T) {
 		}
 		if r.Source != Name {
 			t.Errorf("result %q: Source=%q want %q", r.ID, r.Source, Name)
+		}
+		if r.Status == "" {
+			t.Logf("result %q has empty status (may be absent in older fixture)", r.ID)
+		}
+		if r.LastChapter == 0 {
+			t.Logf("result %q has zero last chapter (may be absent in older fixture)", r.ID)
+		}
+		if r.Rating == 0 {
+			t.Logf("result %q has zero rating (may be absent in older fixture)", r.ID)
 		}
 		// Slug must be directly usable as FetchParams.Slug
 		fp := FetchParams{Slug: r.ID}

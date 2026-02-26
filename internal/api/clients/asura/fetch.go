@@ -105,7 +105,7 @@ func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 
 	t := &toon.Toon{
 		ID:        slug,
-		Source:    Name,
+		Source:    toon.Source(Name),
 		SourceURL: sourceURL,
 	}
 
@@ -169,7 +169,7 @@ func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 					switch label {
 					case "Status":
 						if t.Status == "" {
-							t.Status = value
+							t.Status = toon.ParseStatus(value)
 						}
 					case "Type":
 						if t.Type == "" {

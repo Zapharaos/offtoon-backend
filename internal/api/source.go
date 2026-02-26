@@ -1,19 +1,22 @@
 package api
 
-// Source identifies a known API client by name.
-// It is used in search requests to select which clients to query.
-type Source string
+import "github.com/Zapharaos/offtoon-backend/internal/toon"
+
+// Source is the canonical type for identifying an API client.
+// It is re-exported from the toon package so that API-layer code can use
+// api.Source without importing toon directly.
+type Source = toon.Source
 
 const (
-	SourceAsura Source = "asura"
-	SourceNato  Source = "nato"
+	SourceAsura Source = toon.SourceAsura
+	SourceNato  Source = toon.SourceNato
 )
 
 // allSources is the authoritative list of valid sources.
 var allSources = []Source{SourceAsura, SourceNato}
 
-// Valid reports whether s is a known source.
-func (s Source) Valid() bool {
+// ValidSource reports whether s is a known source.
+func ValidSource(s Source) bool {
 	for _, known := range allSources {
 		if s == known {
 			return true

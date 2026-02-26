@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
@@ -151,14 +152,17 @@ func parseSearchPage(body []byte, baseURL string) ([]toon.SearchResult, bool, er
 		if n.Type == html.ElementNode && n.Data == "a" {
 			slug := seriesSlugFromHref(getAttr(n, "href"))
 			if slug != "" {
-				coverURL := findFirstImgSrc(n)
-				title := findFirstTextOnlySpan(n)
+				coverURL, status := findImgSrcAndStatus(n)
+				title, lastChapter, rating := findInfoContainerFields(n)
 				results = append(results, toon.SearchResult{
-					ID:        slug,
-					Title:     title,
-					CoverURL:  coverURL,
-					Source:    Name,
-					SourceURL: origin + "/series/" + slug,
+					ID:          slug,
+					Title:       title,
+					CoverURL:    coverURL,
+					Status:      status,
+					LastChapter: lastChapter,
+					Rating:      rating,
+					Source:      toon.Source(Name),
+					SourceURL:   origin + "/series/" + slug,
 				})
 				// Do not recurse into a card anchor — its children are not cards.
 				return
@@ -268,70 +272,155 @@ func divContainsCardAnchors(div *html.Node) bool {
 	return false
 }
 
-// findFirstImgSrc returns the src attribute of the first <img> found anywhere
-// inside n.
-func findFirstImgSrc(n *html.Node) string {
+// findImgSrcAndStatus returns the cover image URL and the publication status
+// from a card anchor node.
+//
+// Both pieces of data live in the IMAGE CONTAINER — the first <div> inside the
+// card anchor that contains the <img>:
+//
+//	<div class="flex h-[250px]...">          ← IMAGE CONTAINER
+//	  <span class="status bg-blue-700">Ongoing</span>
+//	  <img src="..." />
+//	  <div>...</div>                          ← platform badge
+//	</div>
+//
+// The status badge is a <span> whose class attribute starts with "status ".
+// Its sole text child is the raw status string (e.g. "Ongoing", "Season End").
+func findImgSrcAndStatus(n *html.Node) (coverURL string, status toon.Status) {
 	img := findFirstImg(n)
 	if img == nil {
-		return ""
-	}
-	return getAttr(img, "src")
-}
-
-// findFirstTextOnlySpan returns the title of a card anchor by locating the
-// info section that follows the image container.
-//
-// Card structure (simplified):
-//
-//	<a href="series/...">
-//	  <div>                      ← outer wrapper
-//	    <div>                    ← inner wrapper
-//	      <div>                  ← IMAGE CONTAINER: holds status badge, <img>, platform badge
-//	      </div>
-//	      <div>                  ← INFO CONTAINER: holds title span, chapter span, rating span
-//	        <span>The Title</span>
-//	      </div>
-//	    </div>
-//	  </div>
-//	</a>
-//
-// Strategy:
-//  1. Find the <img> inside the anchor.
-//  2. Walk up to its nearest <div> ancestor (the image container).
-//  3. Look at each subsequent sibling <div> of that image container.
-//  4. In the first such sibling, return the text of the first <span> whose
-//     sole child is a non-empty text node.
-//
-// This skips the status badge ("Ongoing") and platform badge ("MANGATOON")
-// which both live inside the image container, without relying on any CSS class.
-func findFirstTextOnlySpan(n *html.Node) string {
-	// Step 1: find the <img>.
-	img := findFirstImg(n)
-	if img == nil {
-		return ""
+		return "", toon.StatusUnknown
 	}
 
-	// Step 2: walk up to the nearest <div> ancestor of the img (image container).
+	coverURL = getAttr(img, "src")
+
+	// Walk up to the nearest <div> ancestor of the img (the image container).
 	imgContainer := img.Parent
 	for imgContainer != nil && !(imgContainer.Type == html.ElementNode && imgContainer.Data == "div") {
 		imgContainer = imgContainer.Parent
 	}
 	if imgContainer == nil {
-		return ""
+		return coverURL, toon.StatusUnknown
 	}
 
-	// Step 3 & 4: iterate over subsequent sibling <div>s and find the first
-	// text-only span inside the first one.
-	for sib := imgContainer.NextSibling; sib != nil; sib = sib.NextSibling {
-		if sib.Type != html.ElementNode || sib.Data != "div" {
+	// Look for a <span class="status ..."> direct child of the image container.
+	for c := imgContainer.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode || c.Data != "span" {
 			continue
 		}
-		// Found the info container — look for the title span inside it.
-		if t := firstTextOnlySpanIn(sib); t != "" {
-			return t
+		cls := getAttr(c, "class")
+		if strings.HasPrefix(cls, "status") {
+			raw := strings.TrimSpace(nodeText(c))
+			return coverURL, toon.ParseStatus(raw)
 		}
 	}
-	return ""
+
+	return coverURL, toon.StatusUnknown
+}
+
+// findInfoContainerFields returns the title, chapter count, and rating from a
+// card anchor node. All three come from the INFO CONTAINER — the <div> sibling
+// that follows the image container:
+//
+//	<div class="block w-[100%]...">          ← INFO CONTAINER
+//	  <span class="block ...">The Title</span>
+//	  <span class="text-[13px]...">Chapter <!-- -->24</span>
+//	  <span class="flex ...">               ← rating row
+//	    ... (star icons) ...
+//	    <span class="ml-1 text-xs">9.3</span>
+//	  </span>
+//	</div>
+//
+// The chapter span contains the text "Chapter", a React comment node (<!-- -->),
+// and then the chapter number as a text node. Only the numeric part is returned.
+// The rating is the text of the last <span class="ml-1 text-xs"> in the container.
+func findInfoContainerFields(n *html.Node) (title string, lastChapter float64, rating float64) {
+	img := findFirstImg(n)
+	if img == nil {
+		return "", 0, 0
+	}
+
+	// Walk up to the nearest <div> ancestor of the img (image container).
+	imgContainer := img.Parent
+	for imgContainer != nil && !(imgContainer.Type == html.ElementNode && imgContainer.Data == "div") {
+		imgContainer = imgContainer.Parent
+	}
+	if imgContainer == nil {
+		return "", 0, 0
+	}
+
+	// The info container is the next sibling <div> after the image container.
+	var infoContainer *html.Node
+	for sib := imgContainer.NextSibling; sib != nil; sib = sib.NextSibling {
+		if sib.Type == html.ElementNode && sib.Data == "div" {
+			infoContainer = sib
+			break
+		}
+	}
+	if infoContainer == nil {
+		return "", 0, 0
+	}
+
+	// Iterate direct <span> children of the info container in order:
+	//   1st span → title (sole text-node child)
+	//   2nd span → "Chapter <!-- -->N"
+	//   3rd span → rating row (contains <span class="ml-1 text-xs">N.N</span>)
+	spanIdx := 0
+	for c := infoContainer.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode || c.Data != "span" {
+			continue
+		}
+		spanIdx++
+		switch spanIdx {
+		case 1:
+			// Title: sole text-node child.
+			if ch := c.FirstChild; ch != nil && ch.NextSibling == nil && ch.Type == html.TextNode {
+				title = strings.TrimSpace(ch.Data)
+			}
+		case 2:
+			// Chapter: "Chapter <!-- -->74.5" — scan all text nodes, pick the
+			// last non-empty one that is purely numeric (int or float).
+			var lastNumericText string
+			var scanChapter func(*html.Node)
+			scanChapter = func(nd *html.Node) {
+				if nd.Type == html.TextNode {
+					t := strings.TrimSpace(nd.Data)
+					if t != "" && t != "Chapter" {
+						lastNumericText = t
+					}
+				}
+				for ch := nd.FirstChild; ch != nil; ch = ch.NextSibling {
+					scanChapter(ch)
+				}
+			}
+			scanChapter(c)
+			if lastNumericText != "" {
+				if v, err := strconv.ParseFloat(lastNumericText, 64); err == nil {
+					lastChapter = v
+				}
+			}
+		case 3:
+			// Rating row: find <span class="ml-1 text-xs">N.N</span>.
+			var findRating func(*html.Node)
+			findRating = func(nd *html.Node) {
+				if nd.Type == html.ElementNode && nd.Data == "span" {
+					if getAttr(nd, "class") == "ml-1 text-xs" {
+						if ch := nd.FirstChild; ch != nil && ch.Type == html.TextNode {
+							if v, err := strconv.ParseFloat(strings.TrimSpace(ch.Data), 64); err == nil {
+								rating = v
+							}
+						}
+					}
+				}
+				for ch := nd.FirstChild; ch != nil; ch = ch.NextSibling {
+					findRating(ch)
+				}
+			}
+			findRating(c)
+		}
+	}
+
+	return title, lastChapter, rating
 }
 
 // findFirstImg returns the first <img> element found anywhere inside n.
@@ -345,25 +434,6 @@ func findFirstImg(n *html.Node) *html.Node {
 		}
 	}
 	return nil
-}
-
-// firstTextOnlySpanIn returns the trimmed text of the first <span> anywhere
-// inside n whose only child is a single non-empty text node.
-func firstTextOnlySpanIn(n *html.Node) string {
-	if n.Type == html.ElementNode && n.Data == "span" {
-		child := n.FirstChild
-		if child != nil && child.NextSibling == nil && child.Type == html.TextNode {
-			if t := strings.TrimSpace(child.Data); t != "" {
-				return t
-			}
-		}
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if t := firstTextOnlySpanIn(c); t != "" {
-			return t
-		}
-	}
-	return ""
 }
 
 // seriesSlugFromHref extracts the slug from a series/{slug} href.
