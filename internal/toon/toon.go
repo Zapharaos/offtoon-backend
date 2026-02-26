@@ -1,5 +1,7 @@
 package toon
 
+import "time"
+
 // Status represents the publication status of a toon.
 type Status string
 
@@ -72,11 +74,11 @@ type Page struct {
 // Chapter holds the metadata and (optionally) the pages of one chapter.
 type Chapter struct {
 	// ID is the source-specific identifier.
-	ID     string  `json:"id"`
-	Title  string  `json:"title"`
-	Number float64 `json:"number"` // float to support "12.5" style chapters
-	Date   string  `json:"date,omitempty"`
-	URL    string  `json:"url"`
+	ID     string     `json:"id"`
+	Title  string     `json:"title"`
+	Number float64    `json:"number"` // float to support "12.5" style chapters
+	Date   *time.Time `json:"date,omitempty"`
+	URL    string     `json:"url"`
 	// Pages is populated only when downloading a chapter's images.
 	Pages []Page `json:"pages,omitempty"`
 }
@@ -93,13 +95,13 @@ type Toon struct {
 	// Note holds the studio/publisher blurb that appears before the synopsis
 	// (e.g. "[By the studio that brought you <Solo Leveling>...]").
 	// It is empty when the source does not provide such a note.
-	Note      string   `json:"note,omitempty"`
-	CoverURL  string   `json:"cover_url"`
-	Status    Status   `json:"status"`
-	Type      string   `json:"type"`
-	UpdatedOn string   `json:"updated_on,omitempty"`
-	Genres    []string `json:"genres,omitempty"`
-	Rating    float64  `json:"rating,omitempty"`
+	Note      string     `json:"note,omitempty"`
+	CoverURL  string     `json:"cover_url"`
+	Status    Status     `json:"status"`
+	Type      string     `json:"type"`
+	UpdatedOn *time.Time `json:"updated_on,omitempty"`
+	Genres    []string   `json:"genres,omitempty"`
+	Rating    float64    `json:"rating,omitempty"`
 	// Source is the API client that produced this toon.
 	Source    Source `json:"source"`
 	SourceURL string `json:"source_url"`

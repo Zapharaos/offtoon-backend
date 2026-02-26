@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Zapharaos/offtoon-backend/internal/api"
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
+	"github.com/Zapharaos/offtoon-backend/internal/utils"
 	"golang.org/x/net/html"
 )
 
@@ -157,8 +159,8 @@ func parseFetchPage(body []byte, slug, sourceURL string) (*toon.Toon, error) {
 							t.Serialization = value
 						}
 					case "Updated On":
-						if t.UpdatedOn == "" {
-							t.UpdatedOn = value
+						if t.UpdatedOn == nil {
+							t.UpdatedOn = utils.ParseAsuraDate(value)
 						}
 					}
 				}
@@ -489,9 +491,9 @@ func parseChapterAnchor(a *html.Node, origin string) *toon.Chapter {
 
 	// Collect direct <h3> children for number and date.
 	h3s := directChildH3s(a)
-	var date string
+	var date *time.Time
 	if len(h3s) >= 2 {
-		date = strings.TrimSpace(nodeText(h3s[1]))
+		date = utils.ParseAsuraDate(strings.TrimSpace(nodeText(h3s[1])))
 	}
 
 	return &toon.Chapter{
