@@ -58,7 +58,9 @@ func New(toonHandler *toonruntime.Handler, registry *api.Registry) *Router {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/search", router.handler.Search)
 		r.Post("/fetch", router.handler.Fetch)
-		r.Post("/download", router.handler.Download) // TODO: return chapters
+		r.Post("/download", router.handler.Download)
+		r.Get("/download/{runtimeID}/archive", router.handler.DownloadArchive)
+		r.Get("/download/{runtimeID}/ws", router.handler.DownloadWS)
 	})
 
 	return router

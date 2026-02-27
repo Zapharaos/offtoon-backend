@@ -86,3 +86,35 @@ func TestParseSearchPage(t *testing.T) {
 		}
 	}
 }
+
+func TestParseChapterPage(t *testing.T) {
+	body, err := os.ReadFile(`../../../../tmp/asura chapter response`)
+	if err != nil {
+		t.Skip("chapter response fixture not found:", err)
+	}
+
+	ch, err := parseChapterPage(body, "151", 151, "https://asuracomic.net/series/test/chapter/151")
+	if err != nil {
+		t.Fatalf("parseChapterPage returned error: %v", err)
+	}
+
+	if ch == nil {
+		t.Fatal("parseChapterPage returned nil chapter")
+	}
+
+	t.Logf("Chapter ID=%q Number=%.0f Title=%q Pages=%d", ch.ID, ch.Number, ch.Title, len(ch.Pages))
+
+	if len(ch.Pages) == 0 {
+		t.Fatal("expected at least one page, got 0")
+	}
+
+	for i, p := range ch.Pages {
+		if p.ImageURL == "" {
+			t.Errorf("page %d has empty ImageURL", i+1)
+		}
+		if !strings.Contains(p.ImageURL, "asuracomic.net") && !strings.Contains(p.ImageURL, "gg.asuracomic.net") {
+			t.Errorf("page %d ImageURL %q does not look like asura CDN URL", i+1, p.ImageURL)
+		}
+		t.Logf("  page %d: order=%d url=%s", i+1, p.Number, p.ImageURL)
+	}
+}

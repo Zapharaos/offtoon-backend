@@ -150,7 +150,10 @@ func parseChapterPage(body []byte, chapterID string, num float64, chURL string) 
 	//    key inside a __next_f.push call, then extract the inner JSON string.
 	var chapterData *rscChapterData
 	for _, script := range scripts {
-		if !strings.Contains(script, `"pages"`) || !strings.Contains(script, `__next_f`) {
+		// The pages key may appear as "pages" (plain) or \"pages\" (escaped
+		// inside a JSON string argument to __next_f.push).
+		hasPages := strings.Contains(script, `"pages"`) || strings.Contains(script, `\"pages\"`)
+		if !hasPages || !strings.Contains(script, `__next_f`) {
 			continue
 		}
 
@@ -217,7 +220,21 @@ func collectScriptContents(doc *html.Node) []string {
 // content is the RSC tree. We locate the {"chapter":{"pages":[...]}} object
 // by scanning for the "pages" key and then finding the enclosing object
 // boundaries.
+//
+// Two formats are handled:
+//  1. The RSC payload is a JSON-encoded string inside the push call: quotes
+//     are escaped as \" so the pages array anchor is \"pages\":[.
+//  2. The RSC payload is already plain JSON (unescaped).
 func extractRSCChapterData(script string) (*rscChapterData, error) {
+	// If the pages array is escaped (\"pages\":[) the whole RSC payload is a
+	// JSON string value. Unescape it and retry.
+	if strings.Contains(script, `\"pages\":[`) && !strings.Contains(script, `"pages":[`) {
+		unescaped, err := unescapeRSCString(script)
+		if err == nil && strings.Contains(unescaped, `"pages":[`) {
+			return extractRSCChapterData(unescaped)
+		}
+	}
+
 	// Find the position of `"pages":[` to anchor our search.
 	pagesKey := `"pages":[`
 	pagesIdx := strings.Index(script, pagesKey)
@@ -231,7 +248,6 @@ func extractRSCChapterData(script string) (*rscChapterData, error) {
 	chapterKey := `"chapter":{"id":`
 	chapterIdx := strings.LastIndex(script[:pagesIdx], chapterKey)
 	if chapterIdx < 0 {
-		// Try alternative: just find the nearest `{` that contains "chapter"
 		chapterKey = `"chapter":{`
 		chapterIdx = strings.LastIndex(script[:pagesIdx], chapterKey)
 	}
@@ -239,11 +255,10 @@ func extractRSCChapterData(script string) (*rscChapterData, error) {
 		return nil, nil
 	}
 
-	// Step back to include the enclosing `{` of the outer object
-	// (which also has "comic": {...}).
-	// Look for the `{"comic":` or just walk left for the first `{` before
-	// `"chapter":`.
-	outerStart := strings.LastIndex(script[:chapterIdx], `{"comic":`)
+	// Walk backward from chapterIdx to find the enclosing `{` at depth 0.
+	// This is more robust than string-searching for a specific key like "comic"
+	// which may not be present in all chapter payloads.
+	outerStart := findEnclosingObject(script, chapterIdx)
 	if outerStart < 0 {
 		// Fallback: use the chapter object itself.
 		outerStart = chapterIdx
@@ -258,12 +273,23 @@ func extractRSCChapterData(script string) (*rscChapterData, error) {
 
 	raw := jsonFrag[:end+1]
 
-	// The raw string may contain JSON-escaped sequences (e.g. `\u003c` for `<`,
-	// `\u0026` for `&`) because it was double-encoded inside the outer string.
-	// json.Unmarshal handles Unicode escapes natively, so we can unmarshal directly.
 	var data rscChapterData
 	if err := json.Unmarshal([]byte(raw), &data); err != nil {
-		return nil, fmt.Errorf("unmarshal RSC chapter data: %w", err)
+		// The outer object may contain keys we don't model — try extracting
+		// just the "chapter" sub-object and wrapping it.
+		chStart := strings.Index(raw, `"chapter":{`)
+		if chStart < 0 {
+			return nil, fmt.Errorf("unmarshal RSC chapter data: %w", err)
+		}
+		chFrag := raw[chStart+len(`"chapter":`):]
+		chEnd := findMatchingBrace(chFrag)
+		if chEnd < 0 {
+			return nil, fmt.Errorf("unmarshal RSC chapter data: %w", err)
+		}
+		wrapped := `{"chapter":` + chFrag[:chEnd+1] + `}`
+		if err2 := json.Unmarshal([]byte(wrapped), &data); err2 != nil {
+			return nil, fmt.Errorf("unmarshal RSC chapter data: %w", err2)
+		}
 	}
 
 	if len(data.Chapter.Pages) == 0 {
@@ -271,6 +297,89 @@ func extractRSCChapterData(script string) (*rscChapterData, error) {
 	}
 
 	return &data, nil
+}
+
+// unescapeRSCString extracts and unescapes the JSON string payload inside a
+// __next_f.push([1, "...escaped RSC..."])  script tag.
+//
+// The RSC tree is transmitted as a JSON-encoded string argument, so all inner
+// double quotes are escaped as \". We locate the opening `"` after `[1,` (or
+// `[1, `) and the corresponding closing `"`, then JSON-decode that string so
+// the caller receives plain, unescaped JSON/RSC text.
+func unescapeRSCString(script string) (string, error) {
+	// Find the start of the JSON string value: look for `[1,` followed by the
+	// first `"` character (allowing optional whitespace).
+	marker := `[1,`
+	markerIdx := strings.Index(script, marker)
+	if markerIdx < 0 {
+		return "", fmt.Errorf("no [1, marker found")
+	}
+	start := markerIdx + len(marker)
+	// Skip whitespace.
+	for start < len(script) && (script[start] == ' ' || script[start] == '\t' || script[start] == '\n' || script[start] == '\r') {
+		start++
+	}
+	if start >= len(script) || script[start] != '"' {
+		return "", fmt.Errorf("no opening quote after [1,")
+	}
+
+	// Find the matching closing quote, respecting escape sequences.
+	end := start + 1
+	for end < len(script) {
+		ch := script[end]
+		if ch == '\\' {
+			end += 2 // skip escaped character
+			continue
+		}
+		if ch == '"' {
+			break
+		}
+		end++
+	}
+	if end >= len(script) {
+		return "", fmt.Errorf("no closing quote found")
+	}
+
+	// JSON-decode the extracted string (including surrounding quotes).
+	jsonStr := script[start : end+1]
+	var decoded string
+	if err := json.Unmarshal([]byte(jsonStr), &decoded); err != nil {
+		return "", fmt.Errorf("json decode RSC string: %w", err)
+	}
+	return decoded, nil
+}
+
+// findEnclosingObject walks backward from pos in s to find the `{` that opens
+// the object enclosing the character at pos, at one level above the immediate
+// parent. Returns -1 if not found.
+func findEnclosingObject(s string, pos int) int {
+	// We want the { that is the parent of the object at pos.
+	// Strategy: count brace depth going left; when we reach depth -1 we have
+	// found the immediate parent {. We then continue to find the grandparent.
+	depth := 0
+	inString := false
+	// Simple reverse scan — does not fully handle escaped quotes inside strings
+	// but is sufficient for the well-structured Next.js RSC payload.
+	for i := pos - 1; i >= 0; i-- {
+		ch := s[i]
+		// Detect string boundaries (naively — good enough for RSC JSON).
+		if ch == '"' && (i == 0 || s[i-1] != '\\') {
+			inString = !inString
+		}
+		if inString {
+			continue
+		}
+		switch ch {
+		case '}':
+			depth++
+		case '{':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
 }
 
 // findMatchingBrace returns the index of the closing `}` that matches the

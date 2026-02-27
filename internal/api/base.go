@@ -114,6 +114,23 @@ func (b *BaseClient) Do(ctx context.Context, req *http.Request) (*http.Response,
 	return resp, nil
 }
 
+// DoOnce sends req through the shared HTTP client with throttle delay and
+// user-agent rotation, but without automatic retry on 5xx. Use this for
+// content pages where a 5xx is a permanent condition (e.g. stale slug),
+// not a transient server error. The caller is responsible for closing resp.Body.
+func (b *BaseClient) DoOnce(ctx context.Context, req *http.Request) (*http.Response, error) {
+	b.throttler.SetRequestUserAgent(req)
+	if err := b.throttler.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("throttler wait: %w", err)
+	}
+	resp, err := b.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	b.throttler.LogRateLimitHeaders(resp)
+	return resp, nil
+}
+
 // IsNotFound reports whether err signals "no result" as opposed to a real failure.
 func IsNotFound(err error) bool {
 	return errors.Is(err, toon.ErrNotFound)

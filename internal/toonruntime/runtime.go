@@ -56,9 +56,22 @@ func (rt *RuntimeToon) Start() {
 	go rt.run()
 }
 
-// PushChange pushes a data change to the runtime toon
+// PushChange pushes a data change to the runtime toon.
+// It is non-blocking: if the channel is full the change is dropped with a warning.
 func (rt *RuntimeToon) PushChange(change dataChange) {
-	rt.changeChan <- change
+	select {
+	case rt.changeChan <- change:
+	default:
+		zap.L().Warn("RuntimeToon: changeChan full, dropping change",
+			zap.String("runtime_id", rt.ID.String()),
+		)
+	}
+}
+
+// SetFetchError stores the error that caused the runtime to fail so the fatal
+// packet can surface a useful message instead of the generic fallback.
+func (rt *RuntimeToon) SetFetchError(fe *toon.FetchError) {
+	rt.fetchError = fe
 }
 
 // Unregister returns the unregister channel

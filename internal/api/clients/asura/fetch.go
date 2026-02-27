@@ -44,9 +44,9 @@ func (c *Client) Fetch(ctx context.Context, params api.FetchParams) (*toon.Toon,
 
 // fetchFromURL performs the actual HTTP request and HTML parse for a single base URL.
 func (c *Client) fetchFromURL(ctx context.Context, baseURL, slug string) (*toon.Toon, error) {
-	url := strings.TrimRight(baseURL, "/") + "/series/" + slug
+	seriesURL := strings.TrimRight(baseURL, "/") + "/series/" + slug
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, seriesURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s: build request: %w", Name, err)
 	}
@@ -60,14 +60,23 @@ func (c *Client) fetchFromURL(ctx context.Context, baseURL, slug string) (*toon.
 	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
-	resp, err := c.Do(ctx, req)
+	// Use DoOnce (no retry) so that a 500 from a stale slug doesn't burn
+	// 3 retry attempts — Asura returns 500 permanently for invalid slugs.
+	resp, err := c.DoOnce(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("%s: HTTP request: %w", Name, err)
 	}
 	defer resp.Body.Close()
 
+	// Asura returns 500 (not 404) when a slug is stale or no longer valid
+	// (the site rotates slug suffixes periodically). Treat both as not-found
+	// so the caller gets a clean ErrNotFound instead of a hard server error.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusInternalServerError {
+		return nil, toon.ErrNotFound
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: unexpected status %d for %s", Name, resp.StatusCode, url)
+		return nil, fmt.Errorf("%s: unexpected status %d for %s", Name, resp.StatusCode, seriesURL)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -75,7 +84,7 @@ func (c *Client) fetchFromURL(ctx context.Context, baseURL, slug string) (*toon.
 		return nil, fmt.Errorf("%s: read body: %w", Name, err)
 	}
 
-	return parseFetchPage(body, slug, url)
+	return parseFetchPage(body, slug, seriesURL)
 }
 
 // -----------------------------------------------------------------------

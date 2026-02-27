@@ -107,7 +107,7 @@ func (h *Handler) PushBatchProgress(rsId uuid.UUID, dType DataType, progress wsr
 }
 
 // PushCompleted pushes a completion notification with the final total to the runtime toon.
-func (h *Handler) PushCompleted(rsId uuid.UUID, dType DataType, total int) {
+func (h *Handler) PushCompleted(rsId uuid.UUID, dType DataType, total int, archiveURL string) {
 	if rs := h.GetRuntimeToon(rsId); rs != nil {
 		rs.PushChange(dataChange{
 			Id:     uuid.Nil,
@@ -117,6 +117,7 @@ func (h *Handler) PushCompleted(rsId uuid.UUID, dType DataType, total int) {
 				Total: total,
 				Done:  total,
 			},
+			ArchiveURL: archiveURL,
 		})
 	}
 }

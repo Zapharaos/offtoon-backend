@@ -20,17 +20,18 @@ const (
 )
 
 type dataChange struct {
-	Id       uuid.UUID
-	Type     DataType
-	Reason   DataChangeReason
-	Progress wsruntime.Progress // Only used when working with batches
+	Id         uuid.UUID
+	Type       DataType
+	Reason     DataChangeReason
+	Progress   wsruntime.Progress // Only used when working with batches
+	ArchiveURL string             // Only set on DataTypeCompleted for downloads
 }
 
 // handleDataChangeCompleted handles the data completion
 func (rt *RuntimeToon) handleDataChangeCompleted(change dataChange) {
 	switch change.Type {
 	case DataTypeChapter:
-		rt.broadcastPacket(NewPacketCompleted(change.Progress.Total))
+		rt.broadcastPacket(NewPacketCompleted(change.Progress.Total, change.ArchiveURL))
 	default:
 		break
 	}

@@ -2,11 +2,12 @@ package wsruntime
 
 // Progress tracks batch processing progress with generic items.
 type Progress struct {
-	Total     int   `json:"total"` // Total items to process
-	Done      int   `json:"done"`  // Items completed (sent in previous batches)
-	Items     []any `json:"items"` // Current batch items (can be any type)
-	BatchCurr int   `json:"-"`     // Current batch counter (not serialized)
-	BatchSize int   `json:"-"`     // Batch size limit (not serialized)
+	Total     int    `json:"total"` // Total items to process
+	Done      int    `json:"done"`  // Items completed (sent in previous batches)
+	Items     []any  `json:"items"` // Current batch items (can be any type)
+	Phase     string `json:"-"`     // Caller-defined phase label (not serialized; forwarded to packets)
+	BatchCurr int    `json:"-"`     // Current batch counter (not serialized)
+	BatchSize int    `json:"-"`     // Batch size limit (not serialized)
 }
 
 // NewProgress creates a new progress tracker.

@@ -13,6 +13,7 @@ const (
 	FetchErrorSearch   FetchErrorStep = iota + 1 // failure during Search
 	FetchErrorFetch                              // failure during Fetch
 	FetchErrorDownload                           // failure during Download
+	FetchErrorArchive                            // failure during archive building (image download / packaging)
 	FetchErrorUnknown                            // catch-all
 )
 

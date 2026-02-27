@@ -91,17 +91,30 @@ func (p *PacketFatal) ToJSON() ([]byte, error) {
 // --------------------------------------------
 
 // PacketProgress is a packet sent to report download progress to connected clients.
+//
+// The Phase field lets the frontend distinguish between the two download stages:
+//   - ProgressPhaseChapters: fetching chapter metadata (total = chapters, items = chapter objects)
+//   - ProgressPhaseImages:   downloading page images into the archive (total = images, items = [])
 type PacketProgress struct {
 	packet
-	Total int   `json:"total"` // Total chapters requested
-	Done  int   `json:"done"`  // Chapters fully downloaded so far
-	Items []any `json:"items"` // Chapters downloaded in this batch
+	Phase string `json:"phase"` // "chapters" or "images"
+	Total int    `json:"total"` // Total items in this phase
+	Done  int    `json:"done"`  // Items completed so far in this phase
+	Items []any  `json:"items"` // Populated only during the chapters phase
 }
 
+// Progress phase labels sent in PacketProgress.Phase.
+const (
+	ProgressPhaseChapters = "chapters" // metadata fetch phase
+	ProgressPhaseImages   = "images"   // image download / archive build phase
+)
+
 // NewPacketProgress creates a new PacketProgress from a wsruntime.Progress snapshot.
+// p.Phase is forwarded as-is; use ProgressPhaseChapters / ProgressPhaseImages.
 func NewPacketProgress(p wsruntime.Progress) *PacketProgress {
 	return &PacketProgress{
 		packet: packet{Type: PacketTypeProgress},
+		Phase:  p.Phase,
 		Total:  p.Total,
 		Done:   p.Done,
 		Items:  p.Items,
@@ -120,14 +133,16 @@ func (p *PacketProgress) ToJSON() ([]byte, error) {
 // PacketCompleted signals that a download job has finished successfully.
 type PacketCompleted struct {
 	packet
-	Total int `json:"total"` // Total chapters that were downloaded
+	Total      int    `json:"total"`       // Total chapters that were downloaded
+	ArchiveURL string `json:"archive_url"` // URL to GET the assembled archive file
 }
 
 // NewPacketCompleted creates a new PacketCompleted.
-func NewPacketCompleted(total int) *PacketCompleted {
+func NewPacketCompleted(total int, archiveURL string) *PacketCompleted {
 	return &PacketCompleted{
-		packet: packet{Type: PacketTypeCompleted},
-		Total:  total,
+		packet:     packet{Type: PacketTypeCompleted},
+		Total:      total,
+		ArchiveURL: archiveURL,
 	}
 }
 

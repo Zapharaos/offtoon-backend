@@ -87,11 +87,12 @@ websocket:
 
     # Time allowed to read the next pong message from the peer.
     # Default value: 60 seconds
-    pong_wait: 60
+    pong_wait: 45
 
     # Send pings to peer with this period. Must be less than pongWait.
-    # Default value: 60 seconds (90% of pong_wait)
-    ping_period: 54
+    # Set well below the frontend's inactivity timeout (30s) so long
+    # archive builds don't cause the client to disconnect.
+    ping_period: 20
 
     # Buffer size for the send channel to prevent blocking while allowing some buffering
     # Default value: 64
