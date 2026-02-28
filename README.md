@@ -15,6 +15,10 @@ The backend service provides:
 - **Concurrent Processing** - Worker-pool-based chapter and image downloading
 - **WebSocket Runtime** - Live progress packets during long-running downloads
 
+## Sources Supported
+
+- **AsuraComic** - A popular source for manhwa and manga
+
 ## 🛠️ Technologies
 
 Built with modern Go technologies and best practices:
