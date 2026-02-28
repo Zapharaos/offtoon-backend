@@ -9,11 +9,10 @@ type Source = toon.Source
 
 const (
 	SourceAsura Source = toon.SourceAsura
-	SourceNato  Source = toon.SourceNato
 )
 
 // allSources is the authoritative list of valid sources.
-var allSources = []Source{SourceAsura, SourceNato}
+var allSources = []Source{SourceAsura}
 
 // ValidSource reports whether s is a known source.
 func ValidSource(s Source) bool {

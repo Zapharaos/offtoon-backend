@@ -14,7 +14,7 @@ import (
 
 // fetchRequest is the POST body for the fetch endpoint.
 type fetchRequest struct {
-	// Source is the API client to use (e.g. "asura", "nato").
+	// Source is the API client to use (e.g. "asura").
 	Source api.Source `json:"source"`
 
 	// Slug is the source-specific toon slug (e.g. "0a59965f-some-toon-slug").

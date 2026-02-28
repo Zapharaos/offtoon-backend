@@ -20,7 +20,7 @@ import (
 
 // downloadRequest is the POST body for the download endpoint.
 type downloadRequest struct {
-	// Source is the API client to use (e.g. "asura", "nato").
+	// Source is the API client to use (e.g. "asura").
 	Source api.Source `json:"source"`
 
 	// Slug is the source-specific toon slug.

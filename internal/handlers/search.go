@@ -16,7 +16,7 @@ type searchRequest struct {
 	Input string `json:"input"`
 
 	// Sources is the list of API clients to query.
-	// Valid values: "asura", "nato".
+	// Valid values: "asura".
 	// Must contain at least one entry.
 	Sources []api.Source `json:"sources"`
 }

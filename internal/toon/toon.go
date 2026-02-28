@@ -45,7 +45,6 @@ type Source string
 
 const (
 	SourceAsura Source = "asura"
-	SourceNato  Source = "nato"
 )
 
 // SearchResult is the shared data returned by any client's Search operation.
