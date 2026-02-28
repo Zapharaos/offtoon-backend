@@ -160,7 +160,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		// frontend inactivity timeout.
 		// context.Background() is used because this goroutine outlives the HTTP
 		// request — the caller has already received a 202 Accepted response.
-		archiveData, err := archiver.Build(context.Background(), chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
+		archiveData, succeededChapters, err := archiver.Build(context.Background(), chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
 			h.trh.PushBatchProgress(rt.ID, toonruntime.DataTypeChapter, wsruntime.Progress{
 				Phase: toonruntime.ProgressPhaseImages,
 				Total: pagesTotal,
@@ -168,10 +168,11 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 				Items: []any{},
 			})
 		}, func() {
-			// All chapter archives are built — notify clients that the final
-			// outer ZIP write is starting. This is the last silent phase
-			// (can be several minutes for large downloads) before PacketCompleted.
 			h.trh.PushZipping(rt.ID, len(chapters), string(format))
+		}, func(report archiver.ChapterReport) {
+			// Stream each chapter's build outcome to connected clients as soon
+			// as its worker finishes — progressively, during the archiving phase.
+			h.trh.PushChapterReport(rt.ID, report)
 		})
 		if err != nil {
 			zap.L().Error("Download: archive build failed",
@@ -189,7 +190,9 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		h.archives.Put(rt.ID, filename, archiveData)
 
 		archiveURL := fmt.Sprintf("/api/v1/download/%s/archive", rt.ID.String())
-		h.trh.PushCompleted(rt.ID, toonruntime.DataTypeChapter, len(chapters), archiveURL)
+		// succeededChapters reflects the actual chapters in the archive —
+		// may be less than len(chapters) if some were skipped due to errors.
+		h.trh.PushCompleted(rt.ID, toonruntime.DataTypeChapter, succeededChapters, archiveURL)
 	}()
 
 	render.Accepted(w, r, downloadResponse{RuntimeID: rt.ID.String()})

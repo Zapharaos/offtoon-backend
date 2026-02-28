@@ -63,6 +63,50 @@ func ParseFormat(raw string) Format {
 // chapters; pagesTotal is the grand total across all chapters.
 type ProgressFunc func(pagesDone, pagesTotal int)
 
+// ChapterStatus is the outcome of building one chapter's archive entry.
+type ChapterStatus string
+
+const (
+	// ChapterStatusSuccess means every image was fetched and the archive entry was built.
+	ChapterStatusSuccess ChapterStatus = "success"
+	// ChapterStatusIncomplete means some images failed but the chapter was built with the rest.
+	ChapterStatusIncomplete ChapterStatus = "incomplete"
+	// ChapterStatusFailed means the chapter produced no archive entry at all.
+	ChapterStatusFailed ChapterStatus = "failed"
+)
+
+// ImageStatus is the outcome of fetching one page image.
+type ImageStatus string
+
+const (
+	ImageStatusSuccess ImageStatus = "success"
+	ImageStatusFailed  ImageStatus = "failed"
+)
+
+// ImageReport carries the fetch outcome for a single page image.
+type ImageReport struct {
+	Page   int         `json:"page"`
+	URL    string      `json:"url"`
+	Status ImageStatus `json:"status"`
+	Reason string      `json:"reason,omitempty"` // non-empty only on failure
+}
+
+// ChapterReport is the build outcome for a single chapter, streamed to the
+// caller as soon as the chapter worker finishes (before the outer ZIP is written).
+type ChapterReport struct {
+	ChapterID string        `json:"chapter_id"`
+	Chapter   string        `json:"chapter"` // display name, e.g. "Chapter 001"
+	Status    ChapterStatus `json:"status"`
+	Reason    string        `json:"reason,omitempty"` // non-empty on failed/incomplete
+	Images    []ImageReport `json:"images,omitempty"` // omitted on full success
+}
+
+// OnChapterDoneFunc is called from the worker-pool result handler (single
+// goroutine) each time a chapter finishes building, whether it succeeded,
+// was incomplete, or failed entirely.  Callers use it to push progressive
+// status packets to connected WebSocket clients.
+type OnChapterDoneFunc func(report ChapterReport)
+
 // chapterJob is the input unit for the chapter-level worker pool.
 type chapterJob struct {
 	index   int          // original position in the chapters slice — used to restore order
@@ -70,10 +114,11 @@ type chapterJob struct {
 }
 
 // chapterResult is what the chapter worker returns: the ready-to-write ZIP
-// entries for one chapter, in the order they should appear inside the archive.
+// entries for one chapter and the outcome report to stream to the caller.
 type chapterResult struct {
-	index   int        // mirrors chapterJob.index so the collector can sort
-	entries []zipEntry // one entry per PDF/CBZ/image file produced
+	index   int           // mirrors chapterJob.index so the collector can sort
+	entries []zipEntry    // one entry per PDF/CBZ/image file produced
+	report  ChapterReport // always populated; streamed to the caller immediately
 }
 
 // zipEntry is a single file to be written into the outer ZIP archive.
@@ -104,7 +149,7 @@ type zipEntry struct {
 // is successfully downloaded. onZipping is optional and is called once, right
 // before the final outer ZIP is written — useful to notify clients that the
 // last silent phase (which can take several minutes for large archives) has begun.
-func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func()) ([]byte, error) {
+func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc) ([]byte, int, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
@@ -127,14 +172,77 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 	// workerFunc: fetch all images for a chapter then build the archive format.
 	// This is the hot path: WebP decode + NRGBA normalise + JPEG encode runs
 	// here in parallel across chapters.
+	// On error the chapter is skipped (empty entries) so the rest of the
+	// archive still completes — a single bad chapter never aborts the whole job.
+	// A ChapterReport is always attached to the result so the resultHandler can
+	// stream it to the caller immediately when this worker finishes.
 	workerFunc := func(ctx context.Context, job chapterJob) (chapterResult, error) {
 		ch := job.chapter
 		chapterName := safeChapterName(ch)
 		dirPrefix := path.Join(slug, chapterName)
 
-		images, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, nil /* progress reported below */)
+		rawImages, reasons, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, nil)
 		if err != nil {
-			return chapterResult{}, fmt.Errorf("chapter %s: fetch images: %w", ch.ID, err)
+			// fetchImages itself returning an error is rare (pool-level failure).
+			report := ChapterReport{
+				ChapterID: ch.ID,
+				Chapter:   chapterName,
+				Status:    ChapterStatusFailed,
+				Reason:    err.Error(),
+			}
+			zap.L().Warn("archiver: chapter skipped — image fetch failed",
+				zap.String("chapter_id", ch.ID),
+				zap.String("chapter", chapterName),
+				zap.Error(err),
+			)
+			return chapterResult{index: job.index, entries: nil, report: report}, nil
+		}
+
+		// Build per-image reports and split into valid/skipped.
+		imageReports := make([]ImageReport, len(ch.Pages))
+		images := make([][]byte, 0, len(rawImages))
+		for i, img := range rawImages {
+			page := ch.Pages[i]
+			if img != nil {
+				imageReports[i] = ImageReport{
+					Page:   page.Number,
+					URL:    page.ImageURL,
+					Status: ImageStatusSuccess,
+				}
+				images = append(images, img)
+			} else {
+				imageReports[i] = ImageReport{
+					Page:   page.Number,
+					URL:    page.ImageURL,
+					Status: ImageStatusFailed,
+					Reason: reasons[i],
+				}
+			}
+		}
+
+		skippedImages := len(ch.Pages) - len(images)
+		if skippedImages > 0 {
+			zap.L().Warn("archiver: chapter built with missing pages",
+				zap.String("chapter_id", ch.ID),
+				zap.String("chapter", chapterName),
+				zap.Int("skipped_pages", skippedImages),
+				zap.Int("total_pages", len(ch.Pages)),
+			)
+		}
+
+		if len(images) == 0 {
+			zap.L().Warn("archiver: chapter skipped — no valid images",
+				zap.String("chapter_id", ch.ID),
+				zap.String("chapter", chapterName),
+			)
+			report := ChapterReport{
+				ChapterID: ch.ID,
+				Chapter:   chapterName,
+				Status:    ChapterStatusFailed,
+				Reason:    "all images failed to download",
+				Images:    imageReports,
+			}
+			return chapterResult{index: job.index, entries: nil, report: report}, nil
 		}
 
 		var entries []zipEntry
@@ -143,14 +251,38 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		case FormatPDF:
 			pdfBytes, err := buildPDF(images)
 			if err != nil {
-				return chapterResult{}, fmt.Errorf("chapter %s: build PDF: %w", ch.ID, err)
+				zap.L().Warn("archiver: chapter skipped — PDF build failed",
+					zap.String("chapter_id", ch.ID),
+					zap.String("chapter", chapterName),
+					zap.Error(err),
+				)
+				report := ChapterReport{
+					ChapterID: ch.ID,
+					Chapter:   chapterName,
+					Status:    ChapterStatusFailed,
+					Reason:    fmt.Sprintf("PDF build failed: %s", err.Error()),
+					Images:    imageReports,
+				}
+				return chapterResult{index: job.index, entries: nil, report: report}, nil
 			}
 			entries = []zipEntry{{name: dirPrefix + ".pdf", data: pdfBytes}}
 
 		case FormatCBZ:
 			cbzBytes, err := buildCBZ(ch.Pages, images)
 			if err != nil {
-				return chapterResult{}, fmt.Errorf("chapter %s: build CBZ: %w", ch.ID, err)
+				zap.L().Warn("archiver: chapter skipped — CBZ build failed",
+					zap.String("chapter_id", ch.ID),
+					zap.String("chapter", chapterName),
+					zap.Error(err),
+				)
+				report := ChapterReport{
+					ChapterID: ch.ID,
+					Chapter:   chapterName,
+					Status:    ChapterStatusFailed,
+					Reason:    fmt.Sprintf("CBZ build failed: %s", err.Error()),
+					Images:    imageReports,
+				}
+				return chapterResult{index: job.index, entries: nil, report: report}, nil
 			}
 			entries = []zipEntry{{name: dirPrefix + ".cbz", data: cbzBytes}}
 
@@ -165,64 +297,107 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 			}
 		}
 
-		return chapterResult{index: job.index, entries: entries}, nil
+		// Build the chapter report. Only include image details when there were failures.
+		var report ChapterReport
+		if skippedImages == 0 {
+			report = ChapterReport{
+				ChapterID: ch.ID,
+				Chapter:   chapterName,
+				Status:    ChapterStatusSuccess,
+			}
+		} else {
+			report = ChapterReport{
+				ChapterID: ch.ID,
+				Chapter:   chapterName,
+				Status:    ChapterStatusIncomplete,
+				Reason:    fmt.Sprintf("%d out of %d images failed to download", skippedImages, len(ch.Pages)),
+				Images:    imageReports,
+			}
+		}
+
+		return chapterResult{index: job.index, entries: entries, report: report}, nil
 	}
 
 	// Collect results in a pre-allocated slice indexed by chapter position so
 	// that we can write them to the ZIP in the original chapter order even
 	// though workers complete out of order.
 	ordered := make([]chapterResult, len(chapters))
+	skippedChapters := 0
 
 	// resultHandler runs in a single goroutine (the pool's collector), so
-	// writing into ordered[] and incrementing pagesDone is race-free.
+	// writing into ordered[] and incrementing counters is race-free.
 	resultHandler := func(res chapterResult) error {
 		ordered[res.index] = res
-		// Count images for this chapter and fire progress callbacks.
-		if onProgress != nil {
+
+		if len(res.entries) == 0 {
+			skippedChapters++
+		} else if onProgress != nil {
 			for range chapters[res.index].Pages {
 				pagesDone++
 				onProgress(pagesDone, totalPages)
 			}
 		}
+
+		// Stream the chapter report to the caller immediately — before the
+		// outer ZIP is written — so the frontend gets progressive updates.
+		if onChapterDone != nil {
+			onChapterDone(res.report)
+		}
+
 		return nil
 	}
 
 	cfg := workerpool.NewConfigChapterBuild(len(chapters))
 	pool := workerpool.NewPool(ctx, cfg, workerFunc, nil)
 	pool.SetResultHandler(resultHandler)
-	pool.SetErrorHandler(func(err error) {
-		zap.L().Error("archiver: chapter build error", zap.Error(err))
-	})
 
 	if err := pool.Process(jobs); err != nil {
-		return nil, fmt.Errorf("archiver: %w", err)
+		return nil, 0, fmt.Errorf("archiver: %w", err)
 	}
 
-	// All chapters are built. Write them into the outer ZIP in order.
-	// For large downloads this sequential write can take several minutes
-	// (e.g. ~2 min for a ~2 GB 150-chapter archive).
+	if skippedChapters > 0 {
+		zap.L().Warn("archiver: some chapters were skipped",
+			zap.Int("skipped", skippedChapters),
+			zap.Int("total", len(chapters)),
+		)
+	}
+
+	// All chapters that could be built are ready. Fail only when every single
+	// chapter was skipped — there is nothing useful to put in the archive.
+	succeededChapters := len(chapters) - skippedChapters
+	if succeededChapters == 0 {
+		return nil, 0, fmt.Errorf("archiver: all %d chapters failed, nothing to archive", len(chapters))
+	}
+
+	// Write chapters into the outer ZIP in order, silently skipping any that
+	// produced no entries (already warned above).
 	if onZipping != nil {
 		onZipping()
 	}
 	zap.L().Info("archiver: all chapters built, writing outer ZIP",
-		zap.Int("chapters", len(ordered)),
+		zap.Int("succeeded", succeededChapters),
+		zap.Int("skipped", skippedChapters),
+		zap.Int("total", len(chapters)),
 		zap.String("format", string(format)),
 	)
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 
 	for _, res := range ordered {
+		if len(res.entries) == 0 {
+			continue // chapter was skipped — already warned
+		}
 		for _, e := range res.entries {
 			if err := writeZipEntry(zw, e.name, e.data); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 		}
 	}
 
 	if err := zw.Close(); err != nil {
-		return nil, fmt.Errorf("archiver: finalise ZIP: %w", err)
+		return nil, 0, fmt.Errorf("archiver: finalise ZIP: %w", err)
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), succeededChapters, nil
 }
 
 // -----------------------------------------------------------------------
@@ -240,22 +415,25 @@ type imageJob struct {
 
 // imageResult is what the image worker pool returns for each completed job.
 type imageResult struct {
-	index int
-	data  []byte
+	index  int
+	data   []byte
+	reason string // non-empty when data is nil (fetch failed)
 }
 
 // fetchImages downloads the image at each page's URL concurrently using a
-// worker pool and returns the raw bytes in page-number order.
+// worker pool and returns the raw bytes and per-image error reasons in
+// page-number order.
 //
+// images[i] is nil when the fetch failed; reasons[i] holds the error string
+// in that case (empty string means success).
 // Concurrency is controlled by workerpool.NewConfigImageDownload: workers are
-// capped at 8 to stay within typical CDN rate-limit thresholds while still
-// delivering a significant speedup over sequential fetching.
-//
+// capped at 8 to stay within typical CDN rate-limit thresholds.
 // chapterURL is sent as the Referer header so CDNs that enforce hotlink
 // protection (e.g. gg.asuracomic.net) accept the requests.
 // onPageDone is called after every successful image download (may be nil).
-func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, client *http.Client, onPageDone func()) ([][]byte, error) {
+func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, client *http.Client, onPageDone func()) ([][]byte, []string, error) {
 	images := make([][]byte, len(pages))
+	reasons := make([]string, len(pages))
 
 	// Build the ordered job list.
 	jobs := make([]imageJob, len(pages))
@@ -265,7 +443,9 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 
 	cfg := workerpool.NewConfigImageDownload(len(pages))
 
-	// workerFunc: fetch one image and return its index + raw bytes.
+	// workerFunc: fetch one image and return its index + raw bytes + error reason.
+	// On error the image slot is left nil (logged as a warning) so the chapter
+	// can still be built with whatever pages did succeed.
 	workerFunc := func(ctx context.Context, job imageJob) (imageResult, error) {
 		zap.L().Debug("archiver: fetching image",
 			zap.Int("page", job.page.Number),
@@ -276,7 +456,15 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 
 		data, err := fetchImage(fetchCtx, client, job.page, job.chapterURL)
 		if err != nil {
-			return imageResult{}, fmt.Errorf("fetch page %d: %w", job.page.Number, err)
+			zap.L().Warn("archiver: image fetch failed, skipping page",
+				zap.Int("page", job.page.Number),
+				zap.String("url", job.page.ImageURL),
+				zap.Error(err),
+			)
+			// Return a nil-data result with the reason — do not propagate the
+			// error so the pool keeps running and the chapter is built from
+			// the pages that succeeded.
+			return imageResult{index: job.index, data: nil, reason: err.Error()}, nil
 		}
 		zap.L().Debug("archiver: image fetched",
 			zap.Int("page", job.page.Number),
@@ -289,24 +477,22 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 	// moment it arrives, letting us call onPageDone without waiting for a batch.
 	pool := workerpool.NewPool(ctx, cfg, workerFunc, nil)
 
-	// resultHandler: write each result into the pre-allocated slice.
+	// resultHandler: write each result into the pre-allocated slices.
+	// nil data means the image fetch failed — the slot stays nil and the
+	// reason string is stored so the chapter builder can report it.
 	pool.SetResultHandler(func(res imageResult) error {
 		images[res.index] = res.data
-		if onPageDone != nil {
+		reasons[res.index] = res.reason
+		if res.data != nil && onPageDone != nil {
 			onPageDone()
 		}
 		return nil
 	})
 
-	// errorHandler: log but do not swallow — Process() will return on the first error.
-	pool.SetErrorHandler(func(err error) {
-		zap.L().Warn("archiver: image fetch error", zap.Error(err))
-	})
-
 	if err := pool.Process(jobs); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return images, nil
+	return images, reasons, nil
 }
 
 // fetchImage downloads a single page image with browser-like headers.

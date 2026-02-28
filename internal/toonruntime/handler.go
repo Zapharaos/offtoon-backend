@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
+	"github.com/Zapharaos/offtoon-backend/pkg/archiver"
 	"github.com/Zapharaos/offtoon-backend/pkg/supervisor"
 	"github.com/Zapharaos/offtoon-backend/pkg/wsruntime"
 	"github.com/google/uuid"
@@ -120,6 +121,15 @@ func (h *Handler) PushArchiving(rsId uuid.UUID, chapters int, format string) {
 func (h *Handler) PushZipping(rsId uuid.UUID, chapters int, format string) {
 	if rs := h.GetRuntimeToon(rsId); rs != nil {
 		rs.broadcastPacket(NewPacketZipping(chapters, format))
+	}
+}
+
+// PushChapterReport broadcasts a PacketChapterReport for one chapter to all
+// clients connected to the given runtime. Called as each chapter worker finishes
+// so the frontend receives progressive per-chapter status during the archive build.
+func (h *Handler) PushChapterReport(rsId uuid.UUID, report archiver.ChapterReport) {
+	if rs := h.GetRuntimeToon(rsId); rs != nil {
+		rs.broadcastPacket(NewPacketChapterReport(report))
 	}
 }
 

@@ -246,13 +246,22 @@ func (r *Registry) DownloadSource(
 		return chapters[0], nil
 	}
 
-	var all []toon.Chapter
+	var (
+		all            []toon.Chapter
+		failedChapters int
+	)
 
 	batchHandler := func(batch []toon.Chapter) error {
 		for _, ch := range batch {
+			// Zero-value chapters (ID == "") were produced by a skipped error —
+			// count them but do not include them in the result set.
+			if ch.ID == "" {
+				failedChapters++
+				continue
+			}
 			progress.AddItem(ch)
+			all = append(all, ch)
 		}
-		all = append(all, batch...)
 
 		if onProgress != nil {
 			progress.PrepareForSend()
@@ -270,7 +279,7 @@ func (r *Registry) DownloadSource(
 	var wpWorkers int
 	switch {
 	case total < 5:
-		wpWorkers = total // No point spawning more workers than jobs
+		wpWorkers = total
 	case total < 20:
 		wpWorkers = 5
 	case total < 50:
@@ -278,20 +287,32 @@ func (r *Registry) DownloadSource(
 	case total < 100:
 		wpWorkers = 15
 	default:
-		wpWorkers = 20 // Cap: balances throughput vs. rate-limit risk
+		wpWorkers = 20
 	}
 
 	cfg := workerpool.NewConfig(wpWorkers, max(1, total/wpWorkers))
 	pool := workerpool.NewPool(ctx, cfg, workerFunc, batchHandler)
 
+	// On a chapter error: log it and return a zero-value Chapter so the pool
+	// keeps running. The batchHandler filters zero-value chapters out of the
+	// result and counts them as failures.
 	pool.SetErrorHandler(func(err error) {
 		if !errors.Is(err, toon.ErrNotFound) {
-			zap.L().Error("DownloadSource: chapter download error", zap.Error(err))
+			zap.L().Warn("DownloadSource: chapter download failed, skipping",
+				zap.Error(err),
+			)
 		}
 	})
 
 	if err := pool.Process(jobs); err != nil {
 		return nil, fmt.Errorf("api.Registry.DownloadSource: %w", err)
+	}
+
+	if failedChapters > 0 {
+		zap.L().Warn("DownloadSource: some chapters were skipped",
+			zap.Int("skipped", failedChapters),
+			zap.Int("total", total),
+		)
 	}
 
 	if len(all) == 0 {

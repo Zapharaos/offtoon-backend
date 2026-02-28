@@ -4,30 +4,33 @@ import (
 	"encoding/json"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
+	"github.com/Zapharaos/offtoon-backend/pkg/archiver"
 	"github.com/Zapharaos/offtoon-backend/pkg/wsruntime"
 )
 
 type PacketType string
 
 const (
-	PacketTypeInit      PacketType = "init"
-	PacketTypeFatal     PacketType = "fatal"
-	PacketTypeProgress  PacketType = "progress"
-	PacketTypeArchiving PacketType = "archiving"
-	PacketTypeZipping   PacketType = "zipping"
-	PacketTypeCompleted PacketType = "completed"
+	PacketTypeInit          PacketType = "init"
+	PacketTypeFatal         PacketType = "fatal"
+	PacketTypeProgress      PacketType = "progress"
+	PacketTypeArchiving     PacketType = "archiving"
+	PacketTypeZipping       PacketType = "zipping"
+	PacketTypeChapterReport PacketType = "chapter_report"
+	PacketTypeCompleted     PacketType = "completed"
 )
 
 // packetSpec is a struct that contains all the possible packets
 // WARNING : used for swagger doc and generation
 type packetSpec struct {
-	Packet          packet          `json:"packet"`
-	PacketInit      PacketInit      `json:"packetInit"`
-	PacketFatal     PacketFatal     `json:"packetFatal"`
-	PacketProgress  PacketProgress  `json:"packetProgress"`
-	PacketArchiving PacketArchiving `json:"packetArchiving"`
-	PacketZipping   PacketZipping   `json:"packetZipping"`
-	PacketCompleted PacketCompleted `json:"packetCompleted"`
+	Packet              packet              `json:"packet"`
+	PacketInit          PacketInit          `json:"packetInit"`
+	PacketFatal         PacketFatal         `json:"packetFatal"`
+	PacketProgress      PacketProgress      `json:"packetProgress"`
+	PacketArchiving     PacketArchiving     `json:"packetArchiving"`
+	PacketZipping       PacketZipping       `json:"packetZipping"`
+	PacketChapterReport PacketChapterReport `json:"packetChapterReport"`
+	PacketCompleted     PacketCompleted     `json:"packetCompleted"`
 }
 
 // Packet interface
@@ -185,6 +188,36 @@ func NewPacketZipping(chapters int, format string) *PacketZipping {
 
 // ToJSON returns the JSON representation of the packet.
 func (p *PacketZipping) ToJSON() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// --------------------------------------------
+// --------------------------------------------
+// --------------------------------------------
+
+// PacketChapterReport streams the build outcome for one chapter as soon as
+// its worker finishes — well before the outer ZIP is written. This gives the
+// frontend a progressive, per-chapter status list throughout the archiving phase.
+//
+// On ChapterStatusSuccess the Images field is omitted (all pages succeeded).
+// On ChapterStatusIncomplete or ChapterStatusFailed, Images lists every page
+// with its individual status and failure reason so the user knows exactly
+// which pages are missing and why.
+type PacketChapterReport struct {
+	packet
+	archiver.ChapterReport // embedded — all fields promoted to JSON top-level
+}
+
+// NewPacketChapterReport creates a new PacketChapterReport from an archiver.ChapterReport.
+func NewPacketChapterReport(report archiver.ChapterReport) *PacketChapterReport {
+	return &PacketChapterReport{
+		packet:        packet{Type: PacketTypeChapterReport},
+		ChapterReport: report,
+	}
+}
+
+// ToJSON returns the JSON representation of the packet.
+func (p *PacketChapterReport) ToJSON() ([]byte, error) {
 	return json.Marshal(p)
 }
 
