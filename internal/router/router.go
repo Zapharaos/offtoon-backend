@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -20,7 +21,7 @@ type Router struct {
 	handler *handlers.Handler
 }
 
-func New(toonHandler *toonruntime.Handler, registry *api.Registry) *Router {
+func New(ctx context.Context, toonHandler *toonruntime.Handler, registry *api.Registry) *Router {
 	r := chi.NewRouter()
 
 	// A good base middleware stack
@@ -52,7 +53,7 @@ func New(toonHandler *toonruntime.Handler, registry *api.Registry) *Router {
 
 	router := &Router{
 		Router:  r,
-		handler: handlers.NewHandler(toonHandler, registry),
+		handler: handlers.NewHandler(ctx, toonHandler, registry),
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {

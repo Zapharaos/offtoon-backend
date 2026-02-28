@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/Zapharaos/offtoon-backend/internal/api"
 	"github.com/Zapharaos/offtoon-backend/internal/handlers/render"
@@ -126,7 +128,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			req.ChapterIDs,
 			func(progress wsruntime.Progress) {
 				progress.Phase = toonruntime.ProgressPhaseChapters
-				h.trh.PushBatchProgress(rt.ID, toonruntime.DataTypeChapter, progress)
+				h.trh.BroadcastProgress(rt.ID, progress)
 			},
 		)
 		if err != nil {
@@ -160,8 +162,8 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		// frontend inactivity timeout.
 		// context.Background() is used because this goroutine outlives the HTTP
 		// request — the caller has already received a 202 Accepted response.
-		archiveData, succeededChapters, err := archiver.Build(context.Background(), chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
-			h.trh.PushBatchProgress(rt.ID, toonruntime.DataTypeChapter, wsruntime.Progress{
+		archivePath, succeededChapters, err := archiver.Build(context.Background(), chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
+			h.trh.BroadcastProgress(rt.ID, wsruntime.Progress{
 				Phase: toonruntime.ProgressPhaseImages,
 				Total: pagesTotal,
 				Done:  pagesDone,
@@ -187,7 +189,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		}
 
 		filename := fmt.Sprintf("%s.zip", slug)
-		h.archives.Put(rt.ID, filename, archiveData)
+		h.archives.Put(rt.ID, filename, archivePath)
 
 		archiveURL := fmt.Sprintf("/api/v1/download/%s/archive", rt.ID.String())
 		// succeededChapters reflects the actual chapters in the archive —
@@ -217,17 +219,20 @@ func (h *Handler) DownloadArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename, data, err := h.archives.Consume(id)
+	filename, f, err := h.archives.Consume(id)
 	if err != nil {
 		render.NotFound(w, r, fmt.Errorf("archive not found or already consumed"))
 		return
 	}
+	defer func() {
+		name := f.Name()
+		_ = f.Close()
+		_ = os.Remove(name)
+	}()
 
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-	w.WriteHeader(http.StatusOK)
-	w.Write(data) //nolint:errcheck
+	http.ServeContent(w, r, filename, time.Time{}, f)
 }
 
 // DownloadWS handles GET /api/v1/download/{runtimeID}/ws

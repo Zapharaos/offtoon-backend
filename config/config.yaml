@@ -109,8 +109,8 @@ toonruntime:
   client_chan_cap: 100
 
   # Channel capacity for data changes
-  # Default value: 20
-  change_chan_cap: 20
+  # Default value: 256
+  change_chan_cap: 256
 
   # Event timeout duration (how long event stays active without activity)
   # Expressed as a Golang duration

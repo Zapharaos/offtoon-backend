@@ -47,7 +47,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	toonHandler := toonruntime.NewHandler(ctx)
-	r := router.New(toonHandler, registry)
+	r := router.New(ctx, toonHandler, registry)
 
 	// Get server configuration from config
 	host := viper.GetString("server.host")

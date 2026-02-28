@@ -7,8 +7,9 @@
 //   - FormatCBZ   – one CBZ (ZIP of images) per chapter, all bundled into a ZIP archive.
 //   - FormatImages – raw image files in per-chapter sub-folders, bundled into a ZIP archive.
 //
-// In every case the outermost container is a single ZIP file so the caller
-// always receives one []byte it can stream straight to the HTTP response.
+// In every case the outermost container is a single ZIP file written to a
+// temporary file on disk — never fully buffered in memory — so the caller
+// can serve it with http.ServeContent and the process stays within its RAM budget.
 package archiver
 
 import (
@@ -22,6 +23,7 @@ import (
 	_ "image/png" // register PNG decoder
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -134,8 +136,8 @@ type zipEntry struct {
 //	FormatCBZ:    <toonSlug>/Chapter 001.cbz
 //	FormatImages: <toonSlug>/Chapter 001/<page>.webp
 //
-// The returned []byte is the raw ZIP file ready to be written to an
-// http.ResponseWriter.
+// The archive is written to a temporary file on disk and its path is returned.
+// The caller is responsible for deleting the file after use.
 //
 // Chapters are processed concurrently using a worker pool sized to
 // runtime.NumCPU(). Each worker independently fetches the chapter's page
@@ -149,7 +151,7 @@ type zipEntry struct {
 // is successfully downloaded. onZipping is optional and is called once, right
 // before the final outer ZIP is written — useful to notify clients that the
 // last silent phase (which can take several minutes for large archives) has begun.
-func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc) ([]byte, int, error) {
+func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc) (string, int, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
@@ -159,23 +161,65 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		totalPages += len(ch.Pages)
 	}
 
-	// pagesDone is accessed only from the result handler (single goroutine),
-	// so no mutex is needed.
 	pagesDone := 0
 
-	// Build jobs — one per chapter, tagged with their original index.
 	jobs := make([]chapterJob, len(chapters))
 	for i, ch := range chapters {
 		jobs[i] = chapterJob{index: i, chapter: ch}
 	}
 
-	// workerFunc: fetch all images for a chapter then build the archive format.
-	// This is the hot path: WebP decode + NRGBA normalise + JPEG encode runs
-	// here in parallel across chapters.
-	// On error the chapter is skipped (empty entries) so the rest of the
-	// archive still completes — a single bad chapter never aborts the whole job.
-	// A ChapterReport is always attached to the result so the resultHandler can
-	// stream it to the caller immediately when this worker finishes.
+	// Open the outer ZIP temp file immediately so we can stream chapter
+	// entries into it as they finish — never accumulating all bytes in RAM.
+	tmpFile, err := os.CreateTemp("", "offtoon-archive-*.zip")
+	if err != nil {
+		return "", 0, fmt.Errorf("archiver: create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	zw := zip.NewWriter(tmpFile)
+
+	// cleanup closes and removes the temp file on any error path.
+	cleanup := func() {
+		_ = zw.Close()
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}
+
+	// Streaming ordered writer:
+	// nextIndex tracks the next chapter index we are allowed to write.
+	// pending holds results that arrived out of order.
+	// When a result arrives for nextIndex we write it immediately and then
+	// drain any contiguous pending entries — so at most a handful of
+	// chapters are ever buffered in memory at the same time.
+	nextIndex := 0
+	skippedChapters := 0
+	succeededChapters := 0
+	pending := make(map[int]chapterResult, len(chapters))
+
+	flushPending := func() error {
+		for {
+			res, ok := pending[nextIndex]
+			if !ok {
+				break
+			}
+			delete(pending, nextIndex)
+			nextIndex++
+
+			if len(res.entries) == 0 {
+				skippedChapters++
+				continue
+			}
+			succeededChapters++
+			for _, e := range res.entries {
+				if err := writeZipEntry(zw, e.name, e.data); err != nil {
+					return err
+				}
+			}
+			// Free the chapter's image bytes immediately after writing.
+			res.entries = nil
+		}
+		return nil
+	}
+
 	workerFunc := func(ctx context.Context, job chapterJob) (chapterResult, error) {
 		ch := job.chapter
 		chapterName := safeChapterName(ch)
@@ -183,7 +227,6 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 
 		rawImages, reasons, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, nil)
 		if err != nil {
-			// fetchImages itself returning an error is rare (pool-level failure).
 			report := ChapterReport{
 				ChapterID: ch.ID,
 				Chapter:   chapterName,
@@ -198,7 +241,6 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 			return chapterResult{index: job.index, entries: nil, report: report}, nil
 		}
 
-		// Build per-image reports and split into valid/skipped.
 		imageReports := make([]ImageReport, len(ch.Pages))
 		images := make([][]byte, 0, len(rawImages))
 		for i, img := range rawImages {
@@ -297,7 +339,6 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 			}
 		}
 
-		// Build the chapter report. Only include image details when there were failures.
 		var report ChapterReport
 		if skippedImages == 0 {
 			report = ChapterReport{
@@ -318,32 +359,42 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		return chapterResult{index: job.index, entries: entries, report: report}, nil
 	}
 
-	// Collect results in a pre-allocated slice indexed by chapter position so
-	// that we can write them to the ZIP in the original chapter order even
-	// though workers complete out of order.
-	ordered := make([]chapterResult, len(chapters))
-	skippedChapters := 0
-
-	// resultHandler runs in a single goroutine (the pool's collector), so
-	// writing into ordered[] and incrementing counters is race-free.
+	// resultHandler runs in the pool's single collector goroutine — no mutex needed.
 	resultHandler := func(res chapterResult) error {
-		ordered[res.index] = res
-
-		if len(res.entries) == 0 {
-			skippedChapters++
-		} else if onProgress != nil {
+		// Progress accounting (uses page count from original chapter slice).
+		if len(res.entries) != 0 && onProgress != nil {
 			for range chapters[res.index].Pages {
 				pagesDone++
 				onProgress(pagesDone, totalPages)
 			}
 		}
 
-		// Stream the chapter report to the caller immediately — before the
-		// outer ZIP is written — so the frontend gets progressive updates.
+		// Notify caller immediately (for WebSocket streaming).
 		if onChapterDone != nil {
 			onChapterDone(res.report)
 		}
 
+		// Stream into the ZIP in order. Buffer out-of-order results in pending.
+		if res.index == nextIndex {
+			// Fast path: this is exactly the next chapter we need.
+			nextIndex++
+			if len(res.entries) == 0 {
+				skippedChapters++
+			} else {
+				succeededChapters++
+				for _, e := range res.entries {
+					if err := writeZipEntry(zw, e.name, e.data); err != nil {
+						return err
+					}
+				}
+				res.entries = nil // free immediately
+			}
+			// Drain any contiguous pending chapters.
+			return flushPending()
+		}
+
+		// Out-of-order: park it until its predecessors arrive.
+		pending[res.index] = res
 		return nil
 	}
 
@@ -352,7 +403,8 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 	pool.SetResultHandler(resultHandler)
 
 	if err := pool.Process(jobs); err != nil {
-		return nil, 0, fmt.Errorf("archiver: %w", err)
+		cleanup()
+		return "", 0, fmt.Errorf("archiver: %w", err)
 	}
 
 	if skippedChapters > 0 {
@@ -362,15 +414,11 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		)
 	}
 
-	// All chapters that could be built are ready. Fail only when every single
-	// chapter was skipped — there is nothing useful to put in the archive.
-	succeededChapters := len(chapters) - skippedChapters
 	if succeededChapters == 0 {
-		return nil, 0, fmt.Errorf("archiver: all %d chapters failed, nothing to archive", len(chapters))
+		cleanup()
+		return "", 0, fmt.Errorf("archiver: all %d chapters failed, nothing to archive", len(chapters))
 	}
 
-	// Write chapters into the outer ZIP in order, silently skipping any that
-	// produced no entries (already warned above).
 	if onZipping != nil {
 		onZipping()
 	}
@@ -380,24 +428,17 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		zap.Int("total", len(chapters)),
 		zap.String("format", string(format)),
 	)
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-
-	for _, res := range ordered {
-		if len(res.entries) == 0 {
-			continue // chapter was skipped — already warned
-		}
-		for _, e := range res.entries {
-			if err := writeZipEntry(zw, e.name, e.data); err != nil {
-				return nil, 0, err
-			}
-		}
-	}
 
 	if err := zw.Close(); err != nil {
-		return nil, 0, fmt.Errorf("archiver: finalise ZIP: %w", err)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", 0, fmt.Errorf("archiver: finalise ZIP: %w", err)
 	}
-	return buf.Bytes(), succeededChapters, nil
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", 0, fmt.Errorf("archiver: close temp file: %w", err)
+	}
+	return tmpPath, succeededChapters, nil
 }
 
 // -----------------------------------------------------------------------

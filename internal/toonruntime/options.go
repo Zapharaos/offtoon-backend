@@ -21,7 +21,7 @@ func RuntimeOptionsFromConfig() RuntimeOptions {
 	// correctly. Passing a time.Duration directly stores it as interface{} and
 	// comes back as 0 when the yaml key is absent.
 	viper.SetDefault("toonruntime.client_chan_cap", 100)
-	viper.SetDefault("toonruntime.change_chan_cap", 20)
+	viper.SetDefault("toonruntime.change_chan_cap", 256)
 	viper.SetDefault("toonruntime.timeout", "30m")
 	viper.SetDefault("toonruntime.client_timeout", "10m")
 	viper.SetDefault("toonruntime.client_timeout_check_freq", "30s")

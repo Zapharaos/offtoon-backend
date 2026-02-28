@@ -133,6 +133,16 @@ func (h *Handler) PushChapterReport(rsId uuid.UUID, report archiver.ChapterRepor
 	}
 }
 
+// BroadcastProgress broadcasts a progress packet directly to all connected clients,
+// bypassing the changeChan. Use this for high-frequency progress updates (e.g. per-image
+// during archive builds) where dropping individual updates is acceptable and the
+// changeChan would otherwise overflow and drop critical packets like PushCompleted.
+func (h *Handler) BroadcastProgress(rsId uuid.UUID, progress wsruntime.Progress) {
+	if rs := h.GetRuntimeToon(rsId); rs != nil {
+		rs.broadcastPacket(NewPacketProgress(progress))
+	}
+}
+
 // PushCompleted pushes a completion notification with the final total to the runtime toon.
 func (h *Handler) PushCompleted(rsId uuid.UUID, dType DataType, total int, archiveURL string) {
 	if rs := h.GetRuntimeToon(rsId); rs != nil {
