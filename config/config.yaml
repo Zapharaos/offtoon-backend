@@ -102,6 +102,32 @@ websocket:
     # Default value: 10
     max_consecutive_send_failures: 10
 
+# Set runtime configuration
+toonruntime:
+  # Channel capacity for client connections
+  # Default value: 100
+  client_chan_cap: 100
+
+  # Channel capacity for data changes
+  # Default value: 20
+  change_chan_cap: 20
+
+  # Event timeout duration (how long event stays active without activity)
+  # Expressed as a Golang duration
+  # Default value: "30m"
+  timeout: "30m"
+
+  # Client timeout duration (how long client stays connected without activity)
+  # Since clients do not send data but only listen, this must be high enough to avoid early disconnects
+  # Expressed as a Golang duration
+  # Default value: "10m"
+  client_timeout: "10m"
+
+  # Frequency of client timeout checks
+  # Expressed as a Golang duration
+  # Default value: "30s"
+  client_timeout_check_freq: "30s"
+
 # API clients configuration
 clients:
 
@@ -113,11 +139,11 @@ clients:
       delay_min_ms: 800
       delay_max_ms: 2000
       # Sliding-window rate limit
-      max_requests: 8
-      window_seconds: 60
+      max_requests: 60
+      window_seconds: 30
       # Retry / backoff
       max_attempts: 3
-      initial_backoff_ms: 1000
+      initial_backoff_ms: 2000
       max_backoff_ms: 30000
       backoff_multiplier: 2.0
       # Adaptive throttling

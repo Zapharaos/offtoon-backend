@@ -54,15 +54,18 @@ func (req *downloadRequest) validate() error {
 		return fmt.Errorf("chapter_ids must contain at least one entry")
 	}
 	seen := make(map[string]struct{}, len(req.ChapterIDs))
+	deduped := req.ChapterIDs[:0:0]
 	for _, id := range req.ChapterIDs {
 		if strings.TrimSpace(id) == "" {
 			return fmt.Errorf("chapter_ids must not contain empty entries")
 		}
 		if _, dup := seen[id]; dup {
-			return fmt.Errorf("duplicate chapter_id %q in chapter_ids", id)
+			continue // silently skip duplicates
 		}
 		seen[id] = struct{}{}
+		deduped = append(deduped, id)
 	}
+	req.ChapterIDs = deduped
 	return nil
 }
 
@@ -146,17 +149,29 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			zap.String("format", string(format)),
 		)
 
+		// Notify all connected clients that the archive-build phase is starting.
+		// This lets the frontend switch to a dedicated "archiving…" state rather
+		// than waiting silently after the last chapter-progress packet.
+		h.trh.PushArchiving(rt.ID, len(chapters), string(format))
+
 		// Send a progress packet every time a page image is downloaded during
 		// the archive build. This prevents the WebSocket from going silent for
 		// 30+ seconds while images are being fetched, which would trigger the
 		// frontend inactivity timeout.
-		archiveData, err := archiver.Build(chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
+		// context.Background() is used because this goroutine outlives the HTTP
+		// request — the caller has already received a 202 Accepted response.
+		archiveData, err := archiver.Build(context.Background(), chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
 			h.trh.PushBatchProgress(rt.ID, toonruntime.DataTypeChapter, wsruntime.Progress{
 				Phase: toonruntime.ProgressPhaseImages,
 				Total: pagesTotal,
 				Done:  pagesDone,
 				Items: []any{},
 			})
+		}, func() {
+			// All chapter archives are built — notify clients that the final
+			// outer ZIP write is starting. This is the last silent phase
+			// (can be several minutes for large downloads) before PacketCompleted.
+			h.trh.PushZipping(rt.ID, len(chapters), string(format))
 		})
 		if err != nil {
 			zap.L().Error("Download: archive build failed",

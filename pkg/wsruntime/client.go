@@ -195,6 +195,7 @@ func (c *BaseClient) SendPacket(p Packet) {
 	case c.Send <- data:
 		c.Mutex.Lock()
 		c.ConsecutiveSendFailures = 0
+		c.LastAct = time.Now() // successful send proves the client is reachable
 		c.Mutex.Unlock()
 	default:
 		c.Mutex.Lock()

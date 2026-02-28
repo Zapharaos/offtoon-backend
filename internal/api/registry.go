@@ -267,7 +267,21 @@ func (r *Registry) DownloadSource(
 		jobs[i] = job{chapterID: id}
 	}
 
-	cfg := workerpool.NewConfigOptimal(total, -1)
+	var wpWorkers int
+	switch {
+	case total < 5:
+		wpWorkers = total // No point spawning more workers than jobs
+	case total < 20:
+		wpWorkers = 5
+	case total < 50:
+		wpWorkers = 10
+	case total < 100:
+		wpWorkers = 15
+	default:
+		wpWorkers = 20 // Cap: balances throughput vs. rate-limit risk
+	}
+
+	cfg := workerpool.NewConfig(wpWorkers, max(1, total/wpWorkers))
 	pool := workerpool.NewPool(ctx, cfg, workerFunc, batchHandler)
 
 	pool.SetErrorHandler(func(err error) {

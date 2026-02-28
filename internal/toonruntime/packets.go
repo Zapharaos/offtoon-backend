@@ -13,6 +13,8 @@ const (
 	PacketTypeInit      PacketType = "init"
 	PacketTypeFatal     PacketType = "fatal"
 	PacketTypeProgress  PacketType = "progress"
+	PacketTypeArchiving PacketType = "archiving"
+	PacketTypeZipping   PacketType = "zipping"
 	PacketTypeCompleted PacketType = "completed"
 )
 
@@ -23,6 +25,8 @@ type packetSpec struct {
 	PacketInit      PacketInit      `json:"packetInit"`
 	PacketFatal     PacketFatal     `json:"packetFatal"`
 	PacketProgress  PacketProgress  `json:"packetProgress"`
+	PacketArchiving PacketArchiving `json:"packetArchiving"`
+	PacketZipping   PacketZipping   `json:"packetZipping"`
 	PacketCompleted PacketCompleted `json:"packetCompleted"`
 }
 
@@ -123,6 +127,64 @@ func NewPacketProgress(p wsruntime.Progress) *PacketProgress {
 
 // ToJSON returns the JSON representation of the packet.
 func (p *PacketProgress) ToJSON() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// --------------------------------------------
+// --------------------------------------------
+// --------------------------------------------
+
+// PacketArchiving signals that all chapter metadata has been downloaded and
+// the server is now assembling the final archive (image fetch + PDF/CBZ build).
+// The frontend can use this to display a dedicated "archiving…" state instead
+// of the generic progress spinner, so users understand why there is no more
+// chapter-level progress.
+type PacketArchiving struct {
+	packet
+	Chapters int    `json:"chapters"` // Total number of chapters being archived
+	Format   string `json:"format"`   // Archive format: "pdf", "cbz", or "images"
+}
+
+// NewPacketArchiving creates a new PacketArchiving.
+func NewPacketArchiving(chapters int, format string) *PacketArchiving {
+	return &PacketArchiving{
+		packet:   packet{Type: PacketTypeArchiving},
+		Chapters: chapters,
+		Format:   format,
+	}
+}
+
+// ToJSON returns the JSON representation of the packet.
+func (p *PacketArchiving) ToJSON() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// --------------------------------------------
+// --------------------------------------------
+// --------------------------------------------
+
+// PacketZipping signals that all chapters have been built and the server is now
+// writing them into the final outer ZIP archive. This phase is purely CPU/IO-bound
+// (no more network activity) and can take several minutes for large downloads
+// (e.g. ~2 min for a ~2 GB 151-chapter archive). The frontend should display a
+// dedicated "zipping…" state so users understand why progress has stalled.
+type PacketZipping struct {
+	packet
+	Chapters int    `json:"chapters"` // Total number of chapters being zipped
+	Format   string `json:"format"`   // Archive format: "pdf", "cbz", or "images"
+}
+
+// NewPacketZipping creates a new PacketZipping.
+func NewPacketZipping(chapters int, format string) *PacketZipping {
+	return &PacketZipping{
+		packet:   packet{Type: PacketTypeZipping},
+		Chapters: chapters,
+		Format:   format,
+	}
+}
+
+// ToJSON returns the JSON representation of the packet.
+func (p *PacketZipping) ToJSON() ([]byte, error) {
 	return json.Marshal(p)
 }
 

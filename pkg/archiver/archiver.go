@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
+	"github.com/Zapharaos/offtoon-backend/pkg/workerpool"
 	"github.com/signintech/gopdf"
 	"go.uber.org/zap"
 	_ "golang.org/x/image/webp" // register WebP decoder
@@ -62,6 +63,25 @@ func ParseFormat(raw string) Format {
 // chapters; pagesTotal is the grand total across all chapters.
 type ProgressFunc func(pagesDone, pagesTotal int)
 
+// chapterJob is the input unit for the chapter-level worker pool.
+type chapterJob struct {
+	index   int          // original position in the chapters slice — used to restore order
+	chapter toon.Chapter // chapter metadata + page list
+}
+
+// chapterResult is what the chapter worker returns: the ready-to-write ZIP
+// entries for one chapter, in the order they should appear inside the archive.
+type chapterResult struct {
+	index   int        // mirrors chapterJob.index so the collector can sort
+	entries []zipEntry // one entry per PDF/CBZ/image file produced
+}
+
+// zipEntry is a single file to be written into the outer ZIP archive.
+type zipEntry struct {
+	name string
+	data []byte
+}
+
 // Build downloads all page images for every chapter and assembles them into a
 // single ZIP archive whose internal layout depends on format:
 //
@@ -71,66 +91,130 @@ type ProgressFunc func(pagesDone, pagesTotal int)
 //
 // The returned []byte is the raw ZIP file ready to be written to an
 // http.ResponseWriter.
-// onProgress is optional (may be nil); it is called after every downloaded
-// page image so callers can report live progress to connected clients.
-func Build(chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc) ([]byte, error) {
+//
+// Chapters are processed concurrently using a worker pool sized to
+// runtime.NumCPU(). Each worker independently fetches the chapter's page
+// images (themselves fetched concurrently via a nested image pool) and then
+// builds the requested archive format. Results are collected in original
+// chapter order before being written into the outer ZIP so the archive layout
+// is always deterministic.
+//
+// ctx is forwarded to every HTTP request; cancelling it aborts all in-flight
+// work promptly. onProgress is optional and is called after every page image
+// is successfully downloaded. onZipping is optional and is called once, right
+// before the final outer ZIP is written — useful to notify clients that the
+// last silent phase (which can take several minutes for large archives) has begun.
+func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func()) ([]byte, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 
-	// Count the total number of pages across all chapters up front so the
-	// progress callback can report a meaningful percentage.
 	totalPages := 0
 	for _, ch := range chapters {
 		totalPages += len(ch.Pages)
 	}
+
+	// pagesDone is accessed only from the result handler (single goroutine),
+	// so no mutex is needed.
 	pagesDone := 0
 
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
+	// Build jobs — one per chapter, tagged with their original index.
+	jobs := make([]chapterJob, len(chapters))
+	for i, ch := range chapters {
+		jobs[i] = chapterJob{index: i, chapter: ch}
+	}
 
-	for _, ch := range chapters {
-		// Download all page images for this chapter.
-		// Use the chapter page URL as Referer so the CDN accepts the requests.
-		images, err := fetchImages(ch.Pages, ch.URL, httpClient, func() {
-			pagesDone++
-			if onProgress != nil {
-				onProgress(pagesDone, totalPages)
-			}
-		})
-		if err != nil {
-			return nil, fmt.Errorf("archiver: chapter %s: %w", ch.ID, err)
-		}
-
+	// workerFunc: fetch all images for a chapter then build the archive format.
+	// This is the hot path: WebP decode + NRGBA normalise + JPEG encode runs
+	// here in parallel across chapters.
+	workerFunc := func(ctx context.Context, job chapterJob) (chapterResult, error) {
+		ch := job.chapter
 		chapterName := safeChapterName(ch)
 		dirPrefix := path.Join(slug, chapterName)
+
+		images, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, nil /* progress reported below */)
+		if err != nil {
+			return chapterResult{}, fmt.Errorf("chapter %s: fetch images: %w", ch.ID, err)
+		}
+
+		var entries []zipEntry
 
 		switch format {
 		case FormatPDF:
 			pdfBytes, err := buildPDF(images)
 			if err != nil {
-				return nil, fmt.Errorf("archiver: chapter %s: build PDF: %w", ch.ID, err)
+				return chapterResult{}, fmt.Errorf("chapter %s: build PDF: %w", ch.ID, err)
 			}
-			if err := writeZipEntry(zw, dirPrefix+".pdf", pdfBytes); err != nil {
-				return nil, err
-			}
+			entries = []zipEntry{{name: dirPrefix + ".pdf", data: pdfBytes}}
 
 		case FormatCBZ:
 			cbzBytes, err := buildCBZ(ch.Pages, images)
 			if err != nil {
-				return nil, fmt.Errorf("archiver: chapter %s: build CBZ: %w", ch.ID, err)
+				return chapterResult{}, fmt.Errorf("chapter %s: build CBZ: %w", ch.ID, err)
 			}
-			if err := writeZipEntry(zw, dirPrefix+".cbz", cbzBytes); err != nil {
-				return nil, err
-			}
+			entries = []zipEntry{{name: dirPrefix + ".cbz", data: cbzBytes}}
 
 		case FormatImages:
+			entries = make([]zipEntry, len(images))
 			for i, img := range images {
 				ext := imageExt(ch.Pages, i)
-				name := fmt.Sprintf("%s/%03d%s", dirPrefix, i+1, ext)
-				if err := writeZipEntry(zw, name, img); err != nil {
-					return nil, err
+				entries[i] = zipEntry{
+					name: fmt.Sprintf("%s/%03d%s", dirPrefix, i+1, ext),
+					data: img,
 				}
+			}
+		}
+
+		return chapterResult{index: job.index, entries: entries}, nil
+	}
+
+	// Collect results in a pre-allocated slice indexed by chapter position so
+	// that we can write them to the ZIP in the original chapter order even
+	// though workers complete out of order.
+	ordered := make([]chapterResult, len(chapters))
+
+	// resultHandler runs in a single goroutine (the pool's collector), so
+	// writing into ordered[] and incrementing pagesDone is race-free.
+	resultHandler := func(res chapterResult) error {
+		ordered[res.index] = res
+		// Count images for this chapter and fire progress callbacks.
+		if onProgress != nil {
+			for range chapters[res.index].Pages {
+				pagesDone++
+				onProgress(pagesDone, totalPages)
+			}
+		}
+		return nil
+	}
+
+	cfg := workerpool.NewConfigChapterBuild(len(chapters))
+	pool := workerpool.NewPool(ctx, cfg, workerFunc, nil)
+	pool.SetResultHandler(resultHandler)
+	pool.SetErrorHandler(func(err error) {
+		zap.L().Error("archiver: chapter build error", zap.Error(err))
+	})
+
+	if err := pool.Process(jobs); err != nil {
+		return nil, fmt.Errorf("archiver: %w", err)
+	}
+
+	// All chapters are built. Write them into the outer ZIP in order.
+	// For large downloads this sequential write can take several minutes
+	// (e.g. ~2 min for a ~2 GB 150-chapter archive).
+	if onZipping != nil {
+		onZipping()
+	}
+	zap.L().Info("archiver: all chapters built, writing outer ZIP",
+		zap.Int("chapters", len(ordered)),
+		zap.String("format", string(format)),
+	)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	for _, res := range ordered {
+		for _, e := range res.entries {
+			if err := writeZipEntry(zw, e.name, e.data); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -145,31 +229,82 @@ func Build(chapters []toon.Chapter, slug string, format Format, httpClient *http
 // Internal helpers
 // -----------------------------------------------------------------------
 
-// fetchImages downloads the image at each page's URL and returns the raw bytes
-// in page-number order.
+// imageJob is the input unit fed to the image worker pool — a page together
+// with its original slice index so results can be written back into the correct
+// slot regardless of the order in which goroutines finish.
+type imageJob struct {
+	index      int
+	page       toon.Page
+	chapterURL string
+}
+
+// imageResult is what the image worker pool returns for each completed job.
+type imageResult struct {
+	index int
+	data  []byte
+}
+
+// fetchImages downloads the image at each page's URL concurrently using a
+// worker pool and returns the raw bytes in page-number order.
+//
+// Concurrency is controlled by workerpool.NewConfigImageDownload: workers are
+// capped at 8 to stay within typical CDN rate-limit thresholds while still
+// delivering a significant speedup over sequential fetching.
+//
 // chapterURL is sent as the Referer header so CDNs that enforce hotlink
 // protection (e.g. gg.asuracomic.net) accept the requests.
-// A per-image timeout of 30 s prevents a single slow image from hanging the
-// entire archive build.
 // onPageDone is called after every successful image download (may be nil).
-func fetchImages(pages []toon.Page, chapterURL string, client *http.Client, onPageDone func()) ([][]byte, error) {
+func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, client *http.Client, onPageDone func()) ([][]byte, error) {
 	images := make([][]byte, len(pages))
+
+	// Build the ordered job list.
+	jobs := make([]imageJob, len(pages))
 	for i, p := range pages {
+		jobs[i] = imageJob{index: i, page: p, chapterURL: chapterURL}
+	}
+
+	cfg := workerpool.NewConfigImageDownload(len(pages))
+
+	// workerFunc: fetch one image and return its index + raw bytes.
+	workerFunc := func(ctx context.Context, job imageJob) (imageResult, error) {
 		zap.L().Debug("archiver: fetching image",
-			zap.Int("page", p.Number),
-			zap.String("url", p.ImageURL),
+			zap.Int("page", job.page.Number),
+			zap.String("url", job.page.ImageURL),
 		)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		data, err := fetchImage(ctx, client, p, chapterURL)
-		cancel()
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		data, err := fetchImage(fetchCtx, client, job.page, job.chapterURL)
 		if err != nil {
-			return nil, fmt.Errorf("fetch page %d: %w", p.Number, err)
+			return imageResult{}, fmt.Errorf("fetch page %d: %w", job.page.Number, err)
 		}
-		zap.L().Debug("archiver: image fetched", zap.Int("page", p.Number), zap.Int("bytes", len(data)))
-		images[i] = data
+		zap.L().Debug("archiver: image fetched",
+			zap.Int("page", job.page.Number),
+			zap.Int("bytes", len(data)),
+		)
+		return imageResult{index: job.index, data: data}, nil
+	}
+
+	// Use streaming mode (batchHandler = nil) so each result is available the
+	// moment it arrives, letting us call onPageDone without waiting for a batch.
+	pool := workerpool.NewPool(ctx, cfg, workerFunc, nil)
+
+	// resultHandler: write each result into the pre-allocated slice.
+	pool.SetResultHandler(func(res imageResult) error {
+		images[res.index] = res.data
 		if onPageDone != nil {
 			onPageDone()
 		}
+		return nil
+	})
+
+	// errorHandler: log but do not swallow — Process() will return on the first error.
+	pool.SetErrorHandler(func(err error) {
+		zap.L().Warn("archiver: image fetch error", zap.Error(err))
+	})
+
+	if err := pool.Process(jobs); err != nil {
+		return nil, err
 	}
 	return images, nil
 }

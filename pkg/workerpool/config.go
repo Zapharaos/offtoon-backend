@@ -1,6 +1,9 @@
 package workerpool
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // Config contains configuration for creating a worker pool
 type Config struct {
@@ -53,6 +56,55 @@ func (c Config) WithJobBufferSize(bufferSize int) Config {
 func (c Config) WithFlushInterval(interval time.Duration) Config {
 	c.FlushInterval = interval
 	return c
+}
+
+// NewConfigChapterBuild creates a config tuned for CPU-bound chapter archive
+// building (WebP decode → NRGBA normalise → JPEG re-encode → PDF/CBZ assembly).
+// Each worker handles one full chapter concurrently.
+// Workers are capped at runtime.NumCPU() because this workload is CPU-saturating —
+// more goroutines than cores would add context-switch overhead and hurt throughput.
+// BatchSize is 1 so each finished chapter is forwarded to the ZIP writer
+// immediately without waiting for a full batch to accumulate.
+func NewConfigChapterBuild(chapterCount int) Config {
+	cpus := runtime.NumCPU()
+	workers := chapterCount
+	if workers > cpus {
+		workers = cpus
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return Config{
+		Workers:       workers,
+		BatchSize:     1,
+		JobBufferSize: 0,
+		FlushInterval: 500 * time.Millisecond,
+	}
+}
+
+// NewConfigImageDownload creates a config tuned for HTTP I/O-bound image downloads.
+// Image fetches are high-latency (100ms–2s per request) and mostly waiting on
+// the network, so far more concurrency is needed than for CPU-bound work.
+// Workers are capped at 8 to stay within typical CDN rate-limit thresholds.
+// BatchSize is 1 so every completed image is forwarded immediately (streaming mode).
+func NewConfigImageDownload(imageCount int) Config {
+	var workers int
+	switch {
+	case imageCount <= 1:
+		workers = 1
+	case imageCount <= 5:
+		workers = imageCount
+	case imageCount <= 15:
+		workers = 5
+	default:
+		workers = 8 // Cap: safe ceiling for CDN rate limits
+	}
+	return Config{
+		Workers:       workers,
+		BatchSize:     1,
+		JobBufferSize: 0,
+		FlushInterval: 500 * time.Millisecond,
+	}
 }
 
 // CalculateOptimalWorkers determines the appropriate number of workers based on job count

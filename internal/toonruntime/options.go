@@ -16,18 +16,21 @@ type RuntimeOptions struct {
 
 // RuntimeOptionsFromConfig creates RuntimeOptions from configuration
 func RuntimeOptionsFromConfig() RuntimeOptions {
-	// Set default values for viper
-	viper.SetDefault("setruntime.client_chan_cap", 100)
-	viper.SetDefault("setruntime.change_chan_cap", 20)
-	viper.SetDefault("setruntime.timeout", 30*time.Minute)
-	viper.SetDefault("setruntime.client_timeout", 10*time.Minute)
-	viper.SetDefault("setruntime.client_timeout_check_freq", 30*time.Second)
+	// Set default values for viper.
+	// Use string literals for durations so viper.GetDuration can parse them
+	// correctly. Passing a time.Duration directly stores it as interface{} and
+	// comes back as 0 when the yaml key is absent.
+	viper.SetDefault("toonruntime.client_chan_cap", 100)
+	viper.SetDefault("toonruntime.change_chan_cap", 20)
+	viper.SetDefault("toonruntime.timeout", "30m")
+	viper.SetDefault("toonruntime.client_timeout", "10m")
+	viper.SetDefault("toonruntime.client_timeout_check_freq", "30s")
 
 	return RuntimeOptions{
-		ClientChanCap:          viper.GetInt("setruntime.client_chan_cap"),
-		ChangeChanCap:          viper.GetInt("setruntime.change_chan_cap"),
-		Timeout:                viper.GetDuration("setruntime.timeout"),
-		ClientTimeout:          viper.GetDuration("setruntime.client_timeout"),
-		ClientTimeoutCheckFreq: viper.GetDuration("setruntime.client_timeout_check_freq"),
+		ClientChanCap:          viper.GetInt("toonruntime.client_chan_cap"),
+		ChangeChanCap:          viper.GetInt("toonruntime.change_chan_cap"),
+		Timeout:                viper.GetDuration("toonruntime.timeout"),
+		ClientTimeout:          viper.GetDuration("toonruntime.client_timeout"),
+		ClientTimeoutCheckFreq: viper.GetDuration("toonruntime.client_timeout_check_freq"),
 	}
 }

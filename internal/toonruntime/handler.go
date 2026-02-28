@@ -106,6 +106,23 @@ func (h *Handler) PushBatchProgress(rsId uuid.UUID, dType DataType, progress wsr
 	}
 }
 
+// PushArchiving broadcasts a PacketArchiving to all clients connected to the
+// given runtime, signalling that the image-fetch + archive-assembly phase has begun.
+func (h *Handler) PushArchiving(rsId uuid.UUID, chapters int, format string) {
+	if rs := h.GetRuntimeToon(rsId); rs != nil {
+		rs.broadcastPacket(NewPacketArchiving(chapters, format))
+	}
+}
+
+// PushZipping broadcasts a PacketZipping to all clients connected to the given
+// runtime, signalling that all chapters are built and the final outer ZIP is
+// now being written. This is the last silent phase before PacketCompleted.
+func (h *Handler) PushZipping(rsId uuid.UUID, chapters int, format string) {
+	if rs := h.GetRuntimeToon(rsId); rs != nil {
+		rs.broadcastPacket(NewPacketZipping(chapters, format))
+	}
+}
+
 // PushCompleted pushes a completion notification with the final total to the runtime toon.
 func (h *Handler) PushCompleted(rsId uuid.UUID, dType DataType, total int, archiveURL string) {
 	if rs := h.GetRuntimeToon(rsId); rs != nil {
