@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/go-chi/httprate"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -56,10 +57,40 @@ func New(ctx context.Context, toonHandler *toonruntime.Handler, registry *api.Re
 		handler: handlers.NewHandler(ctx, toonHandler, registry),
 	}
 
+	// Apply rate limiting if enabled
+	if viper.GetBool("rate_limit.enabled") {
+		globalLimit := viper.GetInt("rate_limit.global.max_requests")
+		globalWindow, err := time.ParseDuration(viper.GetString("rate_limit.global.window"))
+		if err != nil {
+			globalWindow = time.Minute
+		}
+		r.Use(httprate.LimitByIP(globalLimit, globalWindow))
+		zap.L().Info("Rate limiting enabled",
+			zap.Int("global_max_requests", globalLimit),
+			zap.Duration("global_window", globalWindow),
+		)
+	} else {
+		zap.L().Info("Rate limiting disabled")
+	}
+
+	// helper to build a per-route limiter from config key (falls back to global values)
+	endpointLimiter := func(key string) func(http.Handler) http.Handler {
+		if !viper.GetBool("rate_limit.enabled") {
+			return func(next http.Handler) http.Handler { return next }
+		}
+		maxReq := viper.GetInt("rate_limit.endpoints." + key + ".max_requests")
+		window, err := time.ParseDuration(viper.GetString("rate_limit.endpoints." + key + ".window"))
+		if err != nil || maxReq == 0 {
+			maxReq = viper.GetInt("rate_limit.global.max_requests")
+			window, _ = time.ParseDuration(viper.GetString("rate_limit.global.window"))
+		}
+		return httprate.LimitByIP(maxReq, window)
+	}
+
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Post("/search", router.handler.Search)
-		r.Post("/fetch", router.handler.Fetch)
-		r.Post("/download", router.handler.Download)
+		r.With(endpointLimiter("search")).Post("/search", router.handler.Search)
+		r.With(endpointLimiter("fetch")).Post("/fetch", router.handler.Fetch)
+		r.With(endpointLimiter("download")).Post("/download", router.handler.Download)
 		r.Get("/download/{runtimeID}/archive", router.handler.DownloadArchive)
 		r.Get("/download/{runtimeID}/ws", router.handler.DownloadWS)
 	})

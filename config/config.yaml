@@ -128,6 +128,42 @@ toonruntime:
   # Default value: "30s"
   client_timeout_check_freq: "30s"
 
+# Rate limiting configuration
+rate_limit:
+
+  # Enable or disable rate limiting globally
+  # Default value: true
+  enabled: true
+
+  # Global rate limit applied to all endpoints (per IP)
+  global:
+    # Maximum number of requests allowed per window
+    # Default value: 200
+    max_requests: 200
+    # Duration of the sliding window
+    # Expressed as a Golang duration
+    # Default value: "1m"
+    window: "1m"
+
+  # Per-endpoint rate limits (per IP)
+  # These override the global limit for specific routes
+  endpoints:
+
+    # POST /api/v1/search
+    search:
+      max_requests: 30
+      window: "1m"
+
+    # POST /api/v1/fetch
+    fetch:
+      max_requests: 20
+      window: "1m"
+
+    # POST /api/v1/download  (starts a potentially long job — keep tight)
+    download:
+      max_requests: 5
+      window: "1m"
+
 # API clients configuration
 clients:
 

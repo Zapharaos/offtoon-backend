@@ -169,23 +169,6 @@ APP_ENV=prod ./bin/offtoon-backend
 
 ---
 
-### API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/search` | Search for toons across sources |
-| `POST` | `/api/v1/fetch` | Fetch full toon details by slug |
-| `POST` | `/api/v1/download` | Start a chapter download job |
-| `GET` | `/api/v1/download/{runtimeID}/ws` | WebSocket stream for download progress |
-| `GET` | `/api/v1/download/{runtimeID}/archive` | Download the completed archive |
-
-### Supported Sources
-
-| Source | Key | Notes |
-|--------|-----|-------|
-| AsuraComic | `asura` | Manhwa/manga source |
-| NatoManga | `nato` | Manga aggregator (multiple mirrors) |
-
 ### Swagger Generation
 
 Generate the swagger file (reused by frontend):
