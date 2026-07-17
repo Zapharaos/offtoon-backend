@@ -57,14 +57,16 @@ func New(ctx context.Context, toonHandler *toonruntime.Handler, registry *api.Re
 		handler: handlers.NewHandler(ctx, toonHandler, registry),
 	}
 
-	// Apply rate limiting if enabled
+	// Build the global rate limiter if enabled. It is applied to the /api/v1
+	// group only (not the health check), so uptime probes are never throttled.
+	var globalLimiter func(http.Handler) http.Handler
 	if viper.GetBool("rate_limit.enabled") {
 		globalLimit := viper.GetInt("rate_limit.global.max_requests")
 		globalWindow, err := time.ParseDuration(viper.GetString("rate_limit.global.window"))
 		if err != nil {
 			globalWindow = time.Minute
 		}
-		r.Use(httprate.LimitByIP(globalLimit, globalWindow))
+		globalLimiter = httprate.LimitByIP(globalLimit, globalWindow)
 		zap.L().Info("Rate limiting enabled",
 			zap.Int("global_max_requests", globalLimit),
 			zap.Duration("global_window", globalWindow),
@@ -87,7 +89,15 @@ func New(ctx context.Context, toonHandler *toonruntime.Handler, registry *api.Re
 		return httprate.LimitByIP(maxReq, window)
 	}
 
+	// Health check for uptime monitors (e.g. Uptime Kuma). Kept outside /api/v1
+	// and free of any rate limiting so probes are never throttled.
+	r.Get("/health", router.handler.Health)
+	r.Head("/health", router.handler.Health)
+
 	r.Route("/api/v1", func(r chi.Router) {
+		if globalLimiter != nil {
+			r.Use(globalLimiter)
+		}
 		r.With(endpointLimiter("search")).Post("/search", router.handler.Search)
 		r.With(endpointLimiter("fetch")).Post("/fetch", router.handler.Fetch)
 		r.With(endpointLimiter("download")).Post("/download", router.handler.Download)

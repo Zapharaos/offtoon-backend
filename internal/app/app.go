@@ -8,6 +8,8 @@ import (
 
 // Init initializes the application.
 func Init(version, buildDate string) {
+	setBuildInfo(version, buildDate)
+
 	initializeConfig()
 
 	loggerProduction := viper.GetBool("logger.production")
