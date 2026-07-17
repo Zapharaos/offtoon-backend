@@ -169,7 +169,7 @@ clients:
 
   asura:
     urls:
-      - "https://asuracomic.net"
+      - "https://api.asurascans.com"
     throttle:
       # Random delay range between requests (milliseconds)
       delay_min_ms: 800

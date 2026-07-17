@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"regexp"
 	"time"
 
 	"github.com/spf13/viper"
@@ -9,22 +8,6 @@ import (
 )
 
 var timeLocation *time.Location
-
-// ordinalSuffixRe strips ordinal suffixes (st, nd, rd, th) from day numbers.
-var ordinalSuffixRe = regexp.MustCompile(`(\d+)(st|nd|rd|th)`)
-
-// ParseAsuraDate parses dates in the format used by Asura: "February 24th 2026".
-// The ordinal suffix (st/nd/rd/th) is stripped before parsing.
-// Returns nil if the input cannot be parsed.
-func ParseAsuraDate(raw string) *time.Time {
-	// Normalise "24th" → "24", "1st" → "1", etc.
-	normalised := ordinalSuffixRe.ReplaceAllString(raw, "$1")
-	t, err := time.Parse("January 2 2006", normalised)
-	if err != nil {
-		return nil
-	}
-	return &t
-}
 
 func InitDate() {
 	tz := viper.GetString("timezone")
