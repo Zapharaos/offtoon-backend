@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,6 +99,17 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 	format := archiver.ParseFormat(req.Format)
 	slug := strings.TrimSpace(req.Slug)
 
+	// Build chapter stubs from the requested IDs. Every chapter to download is
+	// already known, so there is no separate metadata-discovery phase: the
+	// archiver resolves each chapter's page list on demand (pipelined with image
+	// downloads) via resolvePages below.
+	stubs := make([]toon.Chapter, len(req.ChapterIDs))
+	for i, id := range req.ChapterIDs {
+		num, _ := strconv.ParseFloat(id, 64)
+		stubs[i] = toon.Chapter{ID: id, Number: num}
+	}
+	total := len(stubs)
+
 	rt := h.trh.RunToon(toon.Toon{
 		Source: req.Source,
 	})
@@ -121,63 +133,51 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		chapters, err := h.reg.DownloadSource(
-			ctx,
-			req.Source,
-			slug,
-			req.ChapterIDs,
-			func(progress wsruntime.Progress) {
-				progress.Phase = toonruntime.ProgressPhaseChapters
-				h.trh.BroadcastProgress(rt.ID, progress)
-			},
-		)
-		if err != nil {
-			zap.L().Error("Download: chapter download failed",
-				zap.String("runtime_id", rt.ID.String()),
-				zap.String("source", string(req.Source)),
-				zap.String("slug", slug),
-				zap.Error(err),
-			)
-			rt.SetFetchError(&toon.FetchError{Step: toon.FetchErrorDownload, Message: err.Error()})
-			h.trh.PushChange(rt.ID, rt.ID, toonruntime.DataTypeChapter, toonruntime.DataTypeFailed)
-			return
-		}
-
-		// Build the archive in the background after all chapters are fetched.
-		zap.L().Info("Download: starting archive build",
+		zap.L().Info("Download: starting pipelined download",
 			zap.String("runtime_id", rt.ID.String()),
 			zap.String("slug", slug),
-			zap.Int("chapters", len(chapters)),
+			zap.Int("chapters", total),
 			zap.String("format", string(format)),
 		)
 
-		// Notify all connected clients that the archive-build phase is starting.
-		// This lets the frontend switch to a dedicated "archiving…" state rather
-		// than waiting silently after the last chapter-progress packet.
-		h.trh.PushArchiving(rt.ID, len(chapters), string(format))
+		// resolvePages fetches one chapter's page URLs on demand, inside the
+		// archiver's per-chapter worker. This pipelines metadata resolution with
+		// image downloading: chapter A's images start downloading while chapter
+		// B's page list is still being fetched.
+		resolvePages := func(ctx context.Context, ch toon.Chapter) ([]toon.Page, error) {
+			return h.reg.ResolveChapterPages(ctx, req.Source, slug, ch.ID)
+		}
 
-		// Send a progress packet every time a page image is downloaded during
-		// the archive build. This prevents the WebSocket from going silent for
-		// 30+ seconds while images are being fetched, which would trigger the
-		// frontend inactivity timeout.
-		// context.Background() is used because this goroutine outlives the HTTP
-		// request — the caller has already received a 202 Accepted response.
-		archivePath, succeededChapters, err := archiver.Build(context.Background(), chapters, slug, format, nil, func(pagesDone, pagesTotal int) {
+		// onProgress reports page-level progress for a phase ("downloading" while
+		// fetching images, "building" while assembling the archive). It fires on
+		// every page so the UI shows continuous progress through both phases — in
+		// particular the slow PDF build — and the WebSocket stays active (avoiding
+		// the frontend inactivity timeout); a late-connecting client always
+		// catches the next update.
+		onProgress := func(phase string, pagesDone, pagesTotal int) {
 			h.trh.BroadcastProgress(rt.ID, wsruntime.Progress{
-				Phase: toonruntime.ProgressPhaseImages,
+				Phase: phase,
 				Total: pagesTotal,
 				Done:  pagesDone,
 				Items: []any{},
 			})
-		}, func() {
-			h.trh.PushZipping(rt.ID, len(chapters), string(format))
-		}, func(report archiver.ChapterReport) {
-			// Stream each chapter's build outcome to connected clients as soon
-			// as its worker finishes — progressively, during the archiving phase.
+		}
+
+		// onZipping fires once, just before the final outer ZIP is written — a
+		// distinct silent step that can take a while on large archives.
+		onZipping := func() {
+			h.trh.PushZipping(rt.ID, total, string(format))
+		}
+
+		// onChapterReport streams each chapter's build outcome as soon as its
+		// worker finishes, so the frontend can show a per-chapter result list.
+		onChapterReport := func(report archiver.ChapterReport) {
 			h.trh.PushChapterReport(rt.ID, report)
-		})
+		}
+
+		archivePath, succeededChapters, err := archiver.Build(ctx, stubs, slug, format, nil, onProgress, onZipping, onChapterReport, resolvePages)
 		if err != nil {
-			zap.L().Error("Download: archive build failed",
+			zap.L().Error("Download: pipelined download failed",
 				zap.String("runtime_id", rt.ID.String()),
 				zap.String("source", string(req.Source)),
 				zap.String("slug", slug),
@@ -193,7 +193,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 
 		archiveURL := fmt.Sprintf("/api/v1/download/%s/archive", rt.ID.String())
 		// succeededChapters reflects the actual chapters in the archive —
-		// may be less than len(chapters) if some were skipped due to errors.
+		// may be less than total if some were skipped due to errors.
 		h.trh.PushCompleted(rt.ID, toonruntime.DataTypeChapter, succeededChapters, archiveURL)
 	}()
 

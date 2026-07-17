@@ -16,6 +16,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/draw"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
@@ -60,10 +62,31 @@ func ParseFormat(raw string) Format {
 	}
 }
 
-// ProgressFunc is called after each page image is successfully downloaded.
-// pagesDone is the cumulative number of images downloaded so far across all
-// chapters; pagesTotal is the grand total across all chapters.
-type ProgressFunc func(pagesDone, pagesTotal int)
+// Progress sub-phases reported by ProgressFunc. A download is two page-level
+// passes: images are fetched (PhaseDownloading), then assembled into the chosen
+// format (PhaseBuilding — the CPU-heavy step, especially for PDF). Reporting
+// them separately lets the UI show real progress during both, rather than
+// freezing while the archive is built.
+const (
+	PhaseDownloading = "downloading"
+	PhaseBuilding    = "building"
+)
+
+// ProgressFunc is called frequently to report page-level progress for a phase
+// (PhaseDownloading or PhaseBuilding). done is the cumulative number of pages
+// processed in that phase; total is the number of pages known so far. Because
+// pages are resolved lazily when pipelining, total starts at 0 and grows as
+// each chapter's page list resolves. Frequent per-page calls keep the progress
+// UI (and the WebSocket) lively throughout both phases.
+type ProgressFunc func(phase string, done, total int)
+
+// PageResolverFunc lazily resolves the page list for a single chapter. When
+// passed to Build, each chapter worker calls it before downloading images —
+// this is what lets metadata resolution pipeline with image downloads across
+// chapters instead of resolving every chapter's pages up front. It returns the
+// chapter's pages, or an error which marks that one chapter as failed without
+// aborting the whole build.
+type PageResolverFunc func(ctx context.Context, chapter toon.Chapter) ([]toon.Page, error)
 
 // ChapterStatus is the outcome of building one chapter's archive entry.
 type ChapterStatus string
@@ -151,17 +174,31 @@ type zipEntry struct {
 // is successfully downloaded. onZipping is optional and is called once, right
 // before the final outer ZIP is written — useful to notify clients that the
 // last silent phase (which can take several minutes for large archives) has begun.
-func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc) (string, int, error) {
+func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc, resolvePages PageResolverFunc) (string, int, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 
-	totalPages := 0
-	for _, ch := range chapters {
-		totalPages += len(ch.Pages)
+	// Page-level progress counters, updated concurrently from every chapter's
+	// worker — hence atomic. pagesTotal grows as chapters resolve their page
+	// lists. pagesDownloaded advances as images are fetched; pagesBuilt advances
+	// as pages are assembled into the archive format. The two emit helpers are
+	// called on every page so a late-connecting WebSocket client always catches
+	// the next update and never sits on a stale "connecting" view.
+	var pagesTotal, pagesDownloaded, pagesBuilt int64
+	emitDownloading := func() {
+		if onProgress != nil {
+			onProgress(PhaseDownloading, int(atomic.LoadInt64(&pagesDownloaded)), int(atomic.LoadInt64(&pagesTotal)))
+		}
 	}
-
-	pagesDone := 0
+	emitBuilding := func() {
+		if onProgress != nil {
+			onProgress(PhaseBuilding, int(atomic.LoadInt64(&pagesBuilt)), int(atomic.LoadInt64(&pagesTotal)))
+		}
+	}
+	// Emit once up front (0/0) so the UI leaves its "connecting" state immediately
+	// instead of waiting for the first chapter's pages to resolve.
+	emitDownloading()
 
 	jobs := make([]chapterJob, len(chapters))
 	for i, ch := range chapters {
@@ -225,7 +262,52 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		chapterName := safeChapterName(ch)
 		dirPrefix := path.Join(slug, chapterName)
 
-		rawImages, reasons, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, nil)
+		// Resolve the chapter's page URLs lazily if a resolver was provided.
+		// This is the pipelining step: chapter A's images start downloading while
+		// chapter B's page list is still being fetched, instead of resolving every
+		// chapter's metadata up front before any image download begins.
+		if resolvePages != nil {
+			pages, err := resolvePages(ctx, ch)
+			if err != nil {
+				zap.L().Warn("archiver: chapter skipped — page resolution failed",
+					zap.String("chapter_id", ch.ID),
+					zap.String("chapter", chapterName),
+					zap.Error(err),
+				)
+				report := ChapterReport{
+					ChapterID: ch.ID,
+					Chapter:   chapterName,
+					Status:    ChapterStatusFailed,
+					Reason:    fmt.Sprintf("page list resolution failed: %s", err.Error()),
+				}
+				return chapterResult{index: job.index, entries: nil, report: report}, nil
+			}
+			ch.Pages = pages
+		}
+
+		if len(ch.Pages) == 0 {
+			zap.L().Warn("archiver: chapter skipped — no pages",
+				zap.String("chapter_id", ch.ID),
+				zap.String("chapter", chapterName),
+			)
+			report := ChapterReport{
+				ChapterID: ch.ID,
+				Chapter:   chapterName,
+				Status:    ChapterStatusFailed,
+				Reason:    "no pages to download",
+			}
+			return chapterResult{index: job.index, entries: nil, report: report}, nil
+		}
+
+		// Reveal this chapter's page count as soon as it is known, so the progress
+		// total reflects work in flight rather than jumping only at completion.
+		atomic.AddInt64(&pagesTotal, int64(len(ch.Pages)))
+		emitDownloading()
+
+		rawImages, reasons, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, func() {
+			atomic.AddInt64(&pagesDownloaded, 1)
+			emitDownloading()
+		})
 		if err != nil {
 			report := ChapterReport{
 				ChapterID: ch.ID,
@@ -289,9 +371,16 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 
 		var entries []zipEntry
 
+		// onPageBuilt advances the "building" phase progress as each page is
+		// assembled into the output format — the slow, CPU-bound step (esp. PDF).
+		onPageBuilt := func() {
+			atomic.AddInt64(&pagesBuilt, 1)
+			emitBuilding()
+		}
+
 		switch format {
 		case FormatPDF:
-			pdfBytes, err := buildPDF(images)
+			pdfBytes, err := buildPDF(images, onPageBuilt)
 			if err != nil {
 				zap.L().Warn("archiver: chapter skipped — PDF build failed",
 					zap.String("chapter_id", ch.ID),
@@ -310,7 +399,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 			entries = []zipEntry{{name: dirPrefix + ".pdf", data: pdfBytes}}
 
 		case FormatCBZ:
-			cbzBytes, err := buildCBZ(ch.Pages, images)
+			cbzBytes, err := buildCBZ(ch.Pages, images, onPageBuilt)
 			if err != nil {
 				zap.L().Warn("archiver: chapter skipped — CBZ build failed",
 					zap.String("chapter_id", ch.ID),
@@ -336,6 +425,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 					name: fmt.Sprintf("%s/%03d%s", dirPrefix, i+1, ext),
 					data: img,
 				}
+				onPageBuilt()
 			}
 		}
 
@@ -361,13 +451,9 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 
 	// resultHandler runs in the pool's single collector goroutine — no mutex needed.
 	resultHandler := func(res chapterResult) error {
-		// Progress accounting (uses page count from original chapter slice).
-		if len(res.entries) != 0 && onProgress != nil {
-			for range chapters[res.index].Pages {
-				pagesDone++
-				onProgress(pagesDone, totalPages)
-			}
-		}
+		// Progress is page-driven (emitted from the image pools), not tracked here.
+		// This handler only streams the per-chapter report and writes ordered ZIP
+		// entries; it runs in the pool's single collector goroutine.
 
 		// Notify caller immediately (for WebSocket streaming).
 		if onChapterDone != nil {
@@ -471,7 +557,7 @@ type imageResult struct {
 // capped at 8 to stay within typical CDN rate-limit thresholds.
 // chapterURL is sent as the Referer header so CDNs that enforce hotlink
 // protection (e.g. gg.asuracomic.net) accept the requests.
-// onPageDone is called after every successful image download (may be nil).
+// onPageDone is called after every processed page, success or failure (may be nil).
 func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, client *http.Client, onPageDone func()) ([][]byte, []string, error) {
 	images := make([][]byte, len(pages))
 	reasons := make([]string, len(pages))
@@ -492,10 +578,8 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 			zap.Int("page", job.page.Number),
 			zap.String("url", job.page.ImageURL),
 		)
-		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
 
-		data, err := fetchImage(fetchCtx, client, job.page, job.chapterURL)
+		data, err := fetchImageWithRetry(ctx, client, job.page, job.chapterURL)
 		if err != nil {
 			zap.L().Warn("archiver: image fetch failed, skipping page",
 				zap.Int("page", job.page.Number),
@@ -524,7 +608,9 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 	pool.SetResultHandler(func(res imageResult) error {
 		images[res.index] = res.data
 		reasons[res.index] = res.reason
-		if res.data != nil && onPageDone != nil {
+		// Fire on every processed page (success or failure) so page-level progress
+		// reaches its total even when some images fail.
+		if onPageDone != nil {
 			onPageDone()
 		}
 		return nil
@@ -534,6 +620,60 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 		return nil, nil, err
 	}
 	return images, reasons, nil
+}
+
+// imageFetchAttempts is the number of times fetchImageWithRetry tries to
+// download a single image before giving up. A transient network hiccup or a
+// momentary CDN 5xx should not lose the page permanently.
+const imageFetchAttempts = 3
+
+// imageRetryBaseDelay is the backoff before the first retry; it doubles on each
+// subsequent attempt.
+const imageRetryBaseDelay = 500 * time.Millisecond
+
+// errPermanentFetch marks a fetch failure that must not be retried (e.g. an
+// HTTP 4xx — retrying a missing/forbidden image just wastes time).
+var errPermanentFetch = errors.New("permanent fetch failure")
+
+// fetchImageWithRetry downloads a single page image, retrying on transient
+// failures (network errors, timeouts, 5xx) up to imageFetchAttempts times with
+// exponential backoff. A permanent failure (4xx) or a cancelled context stops
+// the retry loop immediately. Each attempt gets its own 30s timeout so one slow
+// hang cannot consume the whole budget.
+func fetchImageWithRetry(ctx context.Context, client *http.Client, p toon.Page, referer string) ([]byte, error) {
+	var lastErr error
+	delay := imageRetryBaseDelay
+
+	for attempt := 1; attempt <= imageFetchAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		data, err := fetchImage(attemptCtx, client, p, referer)
+		cancel()
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+
+		// Do not retry permanent failures or a cancelled parent context.
+		if errors.Is(err, errPermanentFetch) || ctx.Err() != nil {
+			break
+		}
+
+		// No point sleeping after the final attempt.
+		if attempt < imageFetchAttempts {
+			zap.L().Debug("archiver: image fetch attempt failed, retrying",
+				zap.Int("page", p.Number),
+				zap.Int("attempt", attempt),
+				zap.Error(err),
+			)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+			delay *= 2
+		}
+	}
+	return nil, lastErr
 }
 
 // fetchImage downloads a single page image with browser-like headers.
@@ -554,6 +694,12 @@ func fetchImage(ctx context.Context, client *http.Client, p toon.Page, referer s
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
+		// 4xx responses are permanent (missing / forbidden image) — mark them so
+		// the retry loop does not waste attempts on them. 5xx and everything else
+		// stays retryable.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return nil, fmt.Errorf("%w: unexpected status %d", errPermanentFetch, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
@@ -572,7 +718,10 @@ func fetchImage(ctx context.Context, client *http.Client, p toon.Page, referer s
 //  2. Draw onto an 8-bit NRGBA canvas to normalise bit-depth.
 //  3. Re-encode as JPEG (quality 90) — ~10x faster than PNG for manga pages.
 //  4. Embed the JPEG into gopdf (natively supported, no extra processing).
-func buildPDF(images [][]byte) ([]byte, error) {
+//
+// onPageBuilt, when non-nil, is called after each page is assembled — used to
+// drive the "building" phase progress.
+func buildPDF(images [][]byte, onPageBuilt func()) ([]byte, error) {
 	zap.L().Debug("archiver: building PDF", zap.Int("images", len(images)))
 	pdf := gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{Unit: gopdf.UnitPT, PageSize: *gopdf.PageSizeA4})
@@ -608,6 +757,9 @@ func buildPDF(images [][]byte) ([]byte, error) {
 		if err := pdf.ImageByHolder(imgHolder, 0, 0, &pageSize); err != nil {
 			return nil, fmt.Errorf("image %d: embed in PDF: %w", i+1, err)
 		}
+		if onPageBuilt != nil {
+			onPageBuilt()
+		}
 	}
 
 	var buf bytes.Buffer
@@ -618,7 +770,8 @@ func buildPDF(images [][]byte) ([]byte, error) {
 }
 
 // buildCBZ assembles raw image bytes into a CBZ file (a ZIP of images).
-func buildCBZ(pages []toon.Page, images [][]byte) ([]byte, error) {
+// onPageBuilt, when non-nil, is called after each page is added.
+func buildCBZ(pages []toon.Page, images [][]byte, onPageBuilt func()) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for i, img := range images {
@@ -626,6 +779,9 @@ func buildCBZ(pages []toon.Page, images [][]byte) ([]byte, error) {
 		name := fmt.Sprintf("%03d%s", i+1, ext)
 		if err := writeZipEntry(zw, name, img); err != nil {
 			return nil, err
+		}
+		if onPageBuilt != nil {
+			onPageBuilt()
 		}
 	}
 	if err := zw.Close(); err != nil {
@@ -662,6 +818,13 @@ func imageExt(pages []toon.Page, i int) string {
 		return ".webp"
 	}
 	u := pages[i].ImageURL
+	// Strip any query string / fragment before sniffing the extension —
+	// CDN URLs carry a cache-buster (e.g. "a64678.webp?v=1778187277") and
+	// path.Ext would otherwise return ".webp?v=1778187277", producing a
+	// filename that is invalid on Windows (the "?" is illegal).
+	if idx := strings.IndexAny(u, "?#"); idx != -1 {
+		u = u[:idx]
+	}
 	ext := path.Ext(path.Base(u))
 	if ext == "" {
 		return ".webp"

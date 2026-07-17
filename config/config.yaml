@@ -171,19 +171,27 @@ clients:
     urls:
       - "https://api.asurascans.com"
     throttle:
+      # These values target the official JSON API (api.asurascans.com), which is
+      # built to be called — unlike the old HTML site where we had to stay slow
+      # and stealthy to avoid a ban. Warm API latency is ~110-120ms, so we pace
+      # requests at ~3-5/s: fast enough to make the chapter-metadata phase quick,
+      # polite enough not to trip Cloudflare's bot protection. The adaptive
+      # throttle below auto-backs-off if the API starts slowing down.
       # Random delay range between requests (milliseconds)
-      delay_min_ms: 800
-      delay_max_ms: 2000
-      # Sliding-window rate limit
-      max_requests: 60
-      window_seconds: 30
+      delay_min_ms: 150
+      delay_max_ms: 400
+      # Sliding-window rate limit — hard ceiling (~5 req/s) above the delay pacing,
+      # acting as a burst safety net rather than the primary limiter.
+      max_requests: 50
+      window_seconds: 10
       # Retry / backoff
       max_attempts: 3
-      initial_backoff_ms: 2000
+      initial_backoff_ms: 1000
       max_backoff_ms: 30000
       backoff_multiplier: 2.0
-      # Adaptive throttling
-      baseline_response_time_ms: 400
+      # Adaptive throttling — baseline matches measured warm latency, so the
+      # slow-traffic detector triggers if responses exceed ~3x (450ms).
+      baseline_response_time_ms: 150
       slow_threshold_multiplier: 3.0
       adaptive_enabled: true
 

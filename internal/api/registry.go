@@ -8,7 +8,6 @@ import (
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
 	"github.com/Zapharaos/offtoon-backend/pkg/workerpool"
-	"github.com/Zapharaos/offtoon-backend/pkg/wsruntime"
 	"go.uber.org/zap"
 )
 
@@ -201,125 +200,28 @@ func (r *Registry) Download(ctx context.Context, params DownloadParams) ([]toon.
 	return c.Download(ctx, params)
 }
 
-// DownloadSource downloads individual chapters from the given source concurrently,
-// using a worker pool. After each completed batch of chapters, onProgress is called
-// with the current wsruntime.Progress snapshot so the caller can push it to
-// connected WebSocket clients.
+// ResolveChapterPages resolves the page list (image URLs) for a single chapter
+// of the given source. It is the per-chapter metadata step that the archiver
+// calls lazily inside each chapter worker, so page resolution pipelines with
+// image downloading instead of running as a separate up-front phase.
 //
-// source identifies the API client; slug is the toon slug;
-// chapterIDs is the list of chapter IDs to download.
-// onProgress may be nil if progress notifications are not needed.
-//
-// Returns the full list of downloaded chapters or toon.ErrNotFound when none
-// of the requested chapters were found.
-func (r *Registry) DownloadSource(
-	ctx context.Context,
-	source Source,
-	slug string,
-	chapterIDs []string,
-	onProgress func(wsruntime.Progress),
-) ([]toon.Chapter, error) {
+// source identifies the API client; slug is the toon slug; chapterID is the
+// chapter identifier. Returns toon.ErrNotFound when the chapter could not be
+// found on any of the client's URLs (Download handles URL fallback internally).
+func (r *Registry) ResolveChapterPages(ctx context.Context, source Source, slug, chapterID string) ([]toon.Page, error) {
 	c, err := r.Client(string(source))
 	if err != nil {
-		return nil, fmt.Errorf("api.Registry.DownloadSource: %w", err)
+		return nil, fmt.Errorf("api.Registry.ResolveChapterPages: %w", err)
 	}
 
-	total := len(chapterIDs)
-	if total == 0 {
-		return nil, fmt.Errorf("api.Registry.DownloadSource: no chapter IDs provided")
+	chapters, err := c.Download(ctx, c.NewDownloadParams(slug, []string{chapterID}))
+	if err != nil {
+		return nil, err
 	}
-
-	progress := wsruntime.NewProgress(total, workerpool.NewConfigOptimal(total, -1).BatchSize)
-
-	type job struct {
-		chapterID string
-	}
-
-	workerFunc := func(ctx context.Context, j job) (toon.Chapter, error) {
-		chapters, err := c.Download(ctx, c.NewDownloadParams(slug, []string{j.chapterID}))
-		if err != nil {
-			return toon.Chapter{}, err
-		}
-		if len(chapters) == 0 {
-			return toon.Chapter{}, toon.ErrNotFound
-		}
-		return chapters[0], nil
-	}
-
-	var (
-		all            []toon.Chapter
-		failedChapters int
-	)
-
-	batchHandler := func(batch []toon.Chapter) error {
-		for _, ch := range batch {
-			// Zero-value chapters (ID == "") were produced by a skipped error —
-			// count them but do not include them in the result set.
-			if ch.ID == "" {
-				failedChapters++
-				continue
-			}
-			progress.AddItem(ch)
-			all = append(all, ch)
-		}
-
-		if onProgress != nil {
-			progress.PrepareForSend()
-			onProgress(*progress)
-			progress.CompleteBatch()
-		}
-		return nil
-	}
-
-	jobs := make([]job, total)
-	for i, id := range chapterIDs {
-		jobs[i] = job{chapterID: id}
-	}
-
-	var wpWorkers int
-	switch {
-	case total < 5:
-		wpWorkers = total
-	case total < 20:
-		wpWorkers = 5
-	case total < 50:
-		wpWorkers = 10
-	case total < 100:
-		wpWorkers = 15
-	default:
-		wpWorkers = 20
-	}
-
-	cfg := workerpool.NewConfig(wpWorkers, max(1, total/wpWorkers))
-	pool := workerpool.NewPool(ctx, cfg, workerFunc, batchHandler)
-
-	// On a chapter error: log it and return a zero-value Chapter so the pool
-	// keeps running. The batchHandler filters zero-value chapters out of the
-	// result and counts them as failures.
-	pool.SetErrorHandler(func(err error) {
-		if !errors.Is(err, toon.ErrNotFound) {
-			zap.L().Warn("DownloadSource: chapter download failed, skipping",
-				zap.Error(err),
-			)
-		}
-	})
-
-	if err := pool.Process(jobs); err != nil {
-		return nil, fmt.Errorf("api.Registry.DownloadSource: %w", err)
-	}
-
-	if failedChapters > 0 {
-		zap.L().Warn("DownloadSource: some chapters were skipped",
-			zap.Int("skipped", failedChapters),
-			zap.Int("total", total),
-		)
-	}
-
-	if len(all) == 0 {
+	if len(chapters) == 0 {
 		return nil, toon.ErrNotFound
 	}
-
-	return all, nil
+	return chapters[0].Pages, nil
 }
 
 // -----------------------------------------------------------------------

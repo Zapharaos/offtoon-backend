@@ -99,25 +99,30 @@ func (p *PacketFatal) ToJSON() ([]byte, error) {
 
 // PacketProgress is a packet sent to report download progress to connected clients.
 //
-// The Phase field lets the frontend distinguish between the two download stages:
-//   - ProgressPhaseChapters: fetching chapter metadata (total = chapters, items = chapter objects)
-//   - ProgressPhaseImages:   downloading page images into the archive (total = images, items = [])
+// A download runs two pipelined page-level phases: "downloading" (fetching page
+// images) then "building" (assembling them into the chosen format — the slow,
+// CPU-bound step, especially for PDF). Phase says which one; Total is the number
+// of pages known so far (it grows as chapters resolve); Done is the number of
+// pages processed in that phase; Items is empty (per-chapter outcomes are
+// streamed via PacketChapterReport instead).
 type PacketProgress struct {
 	packet
-	Phase string `json:"phase"` // "chapters" or "images"
-	Total int    `json:"total"` // Total items in this phase
-	Done  int    `json:"done"`  // Items completed so far in this phase
-	Items []any  `json:"items"` // Populated only during the chapters phase
+	Phase string `json:"phase"` // "downloading" or "building"
+	Total int    `json:"total"` // Total pages known so far
+	Done  int    `json:"done"`  // Pages processed so far in this phase
+	Items []any  `json:"items"` // Reserved; currently always empty
 }
 
 // Progress phase labels sent in PacketProgress.Phase.
 const (
-	ProgressPhaseChapters = "chapters" // metadata fetch phase
-	ProgressPhaseImages   = "images"   // image download / archive build phase
+	// ProgressPhaseDownloading tracks page image downloads.
+	ProgressPhaseDownloading = "downloading"
+	// ProgressPhaseBuilding tracks archive assembly (CBZ/PDF/image build).
+	ProgressPhaseBuilding = "building"
 )
 
 // NewPacketProgress creates a new PacketProgress from a wsruntime.Progress snapshot.
-// p.Phase is forwarded as-is; use ProgressPhaseChapters / ProgressPhaseImages.
+// p.Phase is forwarded as-is; use ProgressPhaseDownloading / ProgressPhaseBuilding.
 func NewPacketProgress(p wsruntime.Progress) *PacketProgress {
 	return &PacketProgress{
 		packet: packet{Type: PacketTypeProgress},
