@@ -1,8 +1,10 @@
+**Frontend:** [offtoon-ui](https://github.com/Zapharaos/offtoon-ui)
+
 ![GitHub Release](https://img.shields.io/github/v/release/Zapharaos/offtoon-backend) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/Zapharaos/offtoon-backend/golang.yml) ![GitHub License](https://img.shields.io/github/license/Zapharaos/offtoon-backend) [![Go Report Card](https://goreportcard.com/badge/github.com/Zapharaos/offtoon-backend)](https://goreportcard.com/report/github.com/Zapharaos/offtoon-backend)
 
 # Offtoon Backend
 
-**Offtoon Backend** is a high-performance RESTful API service that powers the Offtoon application. Built with Go, it provides search, fetching, and downloading capabilities for webtoons and manga, integrating multiple external sources such as AsuraComic and NatoManga. It supports real-time progress streaming over WebSockets and exports chapters in PDF, CBZ, or raw image formats.
+**Offtoon Backend** is a high-performance RESTful API service that powers the Offtoon application. Built with Go, it provides search, fetching, and downloading capabilities for webtoons and manga, integrating multiple external sources. It supports real-time progress streaming over WebSockets and exports chapters in PDF, CBZ, or raw image formats.
 
 ## 🎯 What is Offtoon Backend?
 
