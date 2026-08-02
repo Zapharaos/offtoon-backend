@@ -200,15 +200,16 @@ func (r *Registry) Download(ctx context.Context, params DownloadParams) ([]toon.
 	return c.Download(ctx, params)
 }
 
-// ResolveChapterPages resolves the page list (image URLs) for a single chapter
-// of the given source. It is the per-chapter metadata step that the archiver
-// calls lazily inside each chapter worker, so page resolution pipelines with
-// image downloading instead of running as a separate up-front phase.
+// ResolveChapterPages resolves the page list (image URLs) and metadata (such as
+// the chapter's canonical URL used as the CDN Referer) for a single chapter.
+// It is the per-chapter metadata step that the archiver calls lazily inside each
+// chapter worker, so page resolution pipelines with image downloading instead of
+// running as a separate up-front phase.
 //
 // source identifies the API client; slug is the toon slug; chapterID is the
 // chapter identifier. Returns toon.ErrNotFound when the chapter could not be
 // found on any of the client's URLs (Download handles URL fallback internally).
-func (r *Registry) ResolveChapterPages(ctx context.Context, source Source, slug, chapterID string) ([]toon.Page, error) {
+func (r *Registry) ResolveChapterPages(ctx context.Context, source Source, slug, chapterID string) (*toon.Chapter, error) {
 	c, err := r.Client(string(source))
 	if err != nil {
 		return nil, fmt.Errorf("api.Registry.ResolveChapterPages: %w", err)
@@ -221,7 +222,8 @@ func (r *Registry) ResolveChapterPages(ctx context.Context, source Source, slug,
 	if len(chapters) == 0 {
 		return nil, toon.ErrNotFound
 	}
-	return chapters[0].Pages, nil
+	ch := chapters[0]
+	return &ch, nil
 }
 
 // -----------------------------------------------------------------------

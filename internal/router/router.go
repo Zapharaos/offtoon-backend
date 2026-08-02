@@ -43,7 +43,7 @@ func New(ctx context.Context, toonHandler *toonruntime.Handler, registry *api.Re
 			AllowedOrigins:   viper.GetStringSlice("cors.allowed_origins"),
 			AllowedMethods:   viper.GetStringSlice("cors.allowed_methods"),
 			AllowedHeaders:   viper.GetStringSlice("cors.allowed_headers"),
-			ExposedHeaders:   []string{"Link"},
+			ExposedHeaders:   []string{"Link", "Content-Disposition"},
 			AllowCredentials: viper.GetBool("cors.allow_credentials"),
 			MaxAge:           viper.GetInt("cors.max_age"),
 		}))

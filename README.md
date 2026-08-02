@@ -1,6 +1,6 @@
 **Frontend:** [offtoon-ui](https://github.com/Zapharaos/offtoon-ui)
 
-![GitHub Release](https://img.shields.io/github/v/release/Zapharaos/offtoon-backend) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/Zapharaos/offtoon-backend/golang.yml) ![GitHub License](https://img.shields.io/github/license/Zapharaos/offtoon-backend) [![Go Report Card](https://goreportcard.com/badge/github.com/Zapharaos/offtoon-backend)](https://goreportcard.com/report/github.com/Zapharaos/offtoon-backend)
+![GitHub Release](cccccccccccccccccccccccccccccccccccchttps://img.shields.io/github/v/release/Zapharaos/offtoon-backend) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/Zapharaos/offtoon-backend/golang.yml) ![GitHub License](https://img.shields.io/github/license/Zapharaos/offtoon-backend) [![Go Report Card](https://goreportcard.com/badge/github.com/Zapharaos/offtoon-backend)](https://goreportcard.com/report/github.com/Zapharaos/offtoon-backend)
 
 # Offtoon Backend
 

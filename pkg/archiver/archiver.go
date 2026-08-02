@@ -3,9 +3,11 @@
 //
 // Supported output formats:
 //
-//   - FormatPDF   – one PDF per chapter, all bundled into a ZIP archive.
-//   - FormatCBZ   – one CBZ (ZIP of images) per chapter, all bundled into a ZIP archive.
-//   - FormatImages – raw image files in per-chapter sub-folders, bundled into a ZIP archive.
+//   - FormatPDF     – one PDF per chapter, all bundled into a ZIP archive.
+//   - FormatCBZ     – one CBZ (ZIP of images) per chapter, all bundled into a ZIP archive.
+//   - FormatImages  – raw image files in per-chapter sub-folders, bundled into a ZIP archive.
+//   - FormatOfftoon – a .offtoon archive: ZIP containing manifest.json, optional cover.webp,
+//     and images under chapters/<NNN>/<page>.<ext>.
 //
 // In every case the outermost container is a single ZIP file written to a
 // temporary file on disk — never fully buffered in memory — so the caller
@@ -26,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -47,6 +50,11 @@ const (
 	FormatCBZ Format = "cbz"
 	// FormatImages places raw image files in per-chapter sub-folders.
 	FormatImages Format = "images"
+	// FormatOfftoon produces a self-contained .offtoon archive (a ZIP) with a
+	// manifest.json at the root, an optional cover image, and chapter images
+	// stored under chapters/<NNN>/<page>.<ext>. Intended for the Offtoon
+	// offline reader.
+	FormatOfftoon Format = "offtoon"
 )
 
 // ParseFormat normalises a raw string into a Format constant.
@@ -57,6 +65,8 @@ func ParseFormat(raw string) Format {
 		return FormatCBZ
 	case FormatImages:
 		return FormatImages
+	case FormatOfftoon:
+		return FormatOfftoon
 	default:
 		return FormatPDF
 	}
@@ -80,13 +90,15 @@ const (
 // UI (and the WebSocket) lively throughout both phases.
 type ProgressFunc func(phase string, done, total int)
 
-// PageResolverFunc lazily resolves the page list for a single chapter. When
-// passed to Build, each chapter worker calls it before downloading images —
+// PageResolverFunc lazily resolves the page list (and optional metadata such
+// as the chapter URL used as the image CDN Referer) for a single chapter.
+// When passed to Build, each chapter worker calls it before downloading images —
 // this is what lets metadata resolution pipeline with image downloads across
-// chapters instead of resolving every chapter's pages up front. It returns the
-// chapter's pages, or an error which marks that one chapter as failed without
-// aborting the whole build.
-type PageResolverFunc func(ctx context.Context, chapter toon.Chapter) ([]toon.Page, error)
+// chapters instead of resolving every chapter's pages up front.
+// The returned Chapter must have Pages populated; URL is used as the HTTP
+// Referer when fetching images (important for CDNs that enforce hotlink checks).
+// An error marks that one chapter as failed without aborting the whole build.
+type PageResolverFunc func(ctx context.Context, chapter toon.Chapter) (*toon.Chapter, error)
 
 // ChapterStatus is the outcome of building one chapter's archive entry.
 type ChapterStatus string
@@ -141,9 +153,10 @@ type chapterJob struct {
 // chapterResult is what the chapter worker returns: the ready-to-write ZIP
 // entries for one chapter and the outcome report to stream to the caller.
 type chapterResult struct {
-	index   int           // mirrors chapterJob.index so the collector can sort
-	entries []zipEntry    // one entry per PDF/CBZ/image file produced
-	report  ChapterReport // always populated; streamed to the caller immediately
+	index      int           // mirrors chapterJob.index so the collector can sort
+	chapterNum float64       // chapter number, used by FormatOfftoon manifest
+	entries    []zipEntry    // one entry per PDF/CBZ/image file produced
+	report     ChapterReport // always populated; streamed to the caller immediately
 }
 
 // zipEntry is a single file to be written into the outer ZIP archive.
@@ -174,10 +187,15 @@ type zipEntry struct {
 // is successfully downloaded. onZipping is optional and is called once, right
 // before the final outer ZIP is written — useful to notify clients that the
 // last silent phase (which can take several minutes for large archives) has begun.
-func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc, resolvePages PageResolverFunc) (string, int, error) {
+func Build(ctx context.Context, chapters []toon.Chapter, slug string, format Format, meta *ToonMeta, httpClient *http.Client, onProgress ProgressFunc, onZipping func(), onChapterDone OnChapterDoneFunc, resolvePages PageResolverFunc) (string, int, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
+
+	// One throttle for the whole build. Every image request in every chapter
+	// passes through it, so the request rate stays bounded no matter how many
+	// chapter workers and image workers end up running concurrently.
+	throttle := newCDNThrottle(imageRequestInterval)
 
 	// Page-level progress counters, updated concurrently from every chapter's
 	// worker — hence atomic. pagesTotal grows as chapters resolve their page
@@ -232,6 +250,10 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 	succeededChapters := 0
 	pending := make(map[int]chapterResult, len(chapters))
 
+	// manifestChapters accumulates per-chapter metadata for FormatOfftoon.
+	// Written into manifest.json after all chapters finish.
+	var manifestChapters []manifestChapter
+
 	flushPending := func() error {
 		for {
 			res, ok := pending[nextIndex]
@@ -240,6 +262,17 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 			}
 			delete(pending, nextIndex)
 			nextIndex++
+
+			if format == FormatOfftoon {
+				manifestChapters = append(manifestChapters, manifestChapter{
+					ID:     res.report.ChapterID,
+					Number: res.chapterNum,
+					Title:  res.report.Chapter,
+					Pages:  len(res.entries),
+					Path:   safeChapterDir(res.chapterNum),
+					Status: string(res.report.Status),
+				})
+			}
 
 			if len(res.entries) == 0 {
 				skippedChapters++
@@ -267,7 +300,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		// chapter B's page list is still being fetched, instead of resolving every
 		// chapter's metadata up front before any image download begins.
 		if resolvePages != nil {
-			pages, err := resolvePages(ctx, ch)
+			resolved, err := resolvePages(ctx, ch)
 			if err != nil {
 				zap.L().Warn("archiver: chapter skipped — page resolution failed",
 					zap.String("chapter_id", ch.ID),
@@ -280,9 +313,14 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 					Status:    ChapterStatusFailed,
 					Reason:    fmt.Sprintf("page list resolution failed: %s", err.Error()),
 				}
-				return chapterResult{index: job.index, entries: nil, report: report}, nil
+				return chapterResult{index: job.index, chapterNum: ch.Number, entries: nil, report: report}, nil
 			}
-			ch.Pages = pages
+			ch.Pages = resolved.Pages
+			// Preserve the chapter's canonical URL for use as the HTTP Referer
+			// when fetching images — CDNs such as Asura's enforce hotlink checks.
+			if resolved.URL != "" {
+				ch.URL = resolved.URL
+			}
 		}
 
 		if len(ch.Pages) == 0 {
@@ -296,7 +334,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 				Status:    ChapterStatusFailed,
 				Reason:    "no pages to download",
 			}
-			return chapterResult{index: job.index, entries: nil, report: report}, nil
+			return chapterResult{index: job.index, chapterNum: ch.Number, entries: nil, report: report}, nil
 		}
 
 		// Reveal this chapter's page count as soon as it is known, so the progress
@@ -304,7 +342,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		atomic.AddInt64(&pagesTotal, int64(len(ch.Pages)))
 		emitDownloading()
 
-		rawImages, reasons, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, func() {
+		rawImages, reasons, err := fetchImages(ctx, ch.Pages, ch.URL, httpClient, throttle, func() {
 			atomic.AddInt64(&pagesDownloaded, 1)
 			emitDownloading()
 		})
@@ -320,7 +358,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 				zap.String("chapter", chapterName),
 				zap.Error(err),
 			)
-			return chapterResult{index: job.index, entries: nil, report: report}, nil
+			return chapterResult{index: job.index, chapterNum: ch.Number, entries: nil, report: report}, nil
 		}
 
 		imageReports := make([]ImageReport, len(ch.Pages))
@@ -366,7 +404,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 				Reason:    "all images failed to download",
 				Images:    imageReports,
 			}
-			return chapterResult{index: job.index, entries: nil, report: report}, nil
+			return chapterResult{index: job.index, chapterNum: ch.Number, entries: nil, report: report}, nil
 		}
 
 		var entries []zipEntry
@@ -394,7 +432,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 					Reason:    fmt.Sprintf("PDF build failed: %s", err.Error()),
 					Images:    imageReports,
 				}
-				return chapterResult{index: job.index, entries: nil, report: report}, nil
+				return chapterResult{index: job.index, chapterNum: ch.Number, entries: nil, report: report}, nil
 			}
 			entries = []zipEntry{{name: dirPrefix + ".pdf", data: pdfBytes}}
 
@@ -413,7 +451,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 					Reason:    fmt.Sprintf("CBZ build failed: %s", err.Error()),
 					Images:    imageReports,
 				}
-				return chapterResult{index: job.index, entries: nil, report: report}, nil
+				return chapterResult{index: job.index, chapterNum: ch.Number, entries: nil, report: report}, nil
 			}
 			entries = []zipEntry{{name: dirPrefix + ".cbz", data: cbzBytes}}
 
@@ -423,6 +461,18 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 				ext := imageExt(ch.Pages, i)
 				entries[i] = zipEntry{
 					name: fmt.Sprintf("%s/%03d%s", dirPrefix, i+1, ext),
+					data: img,
+				}
+				onPageBuilt()
+			}
+
+		case FormatOfftoon:
+			chapterDir := safeChapterDir(ch.Number)
+			entries = make([]zipEntry, len(images))
+			for i, img := range images {
+				ext := imageExt(ch.Pages, i)
+				entries[i] = zipEntry{
+					name: fmt.Sprintf("%s/%03d%s", chapterDir, i+1, ext),
 					data: img,
 				}
 				onPageBuilt()
@@ -446,7 +496,7 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 			}
 		}
 
-		return chapterResult{index: job.index, entries: entries, report: report}, nil
+		return chapterResult{index: job.index, chapterNum: ch.Number, entries: entries, report: report}, nil
 	}
 
 	// resultHandler runs in the pool's single collector goroutine — no mutex needed.
@@ -464,6 +514,18 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		if res.index == nextIndex {
 			// Fast path: this is exactly the next chapter we need.
 			nextIndex++
+
+			if format == FormatOfftoon {
+				manifestChapters = append(manifestChapters, manifestChapter{
+					ID:     res.report.ChapterID,
+					Number: res.chapterNum,
+					Title:  res.report.Chapter,
+					Pages:  len(res.entries),
+					Path:   safeChapterDir(res.chapterNum),
+					Status: string(res.report.Status),
+				})
+			}
+
 			if len(res.entries) == 0 {
 				skippedChapters++
 			} else {
@@ -505,6 +567,34 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		return "", 0, fmt.Errorf("archiver: all %d chapters failed, nothing to archive", len(chapters))
 	}
 
+	// For .offtoon: write the optional cover image and manifest before closing.
+	if format == FormatOfftoon {
+		hasCover := false
+		if meta != nil && meta.CoverURL != "" {
+			coverCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			coverData, err := fetchCoverImage(coverCtx, httpClient, meta.CoverURL)
+			cancel()
+			if err != nil {
+				zap.L().Warn("archiver: cover fetch failed, skipping", zap.Error(err))
+			} else {
+				if err := writeZipEntry(zw, "cover.webp", coverData); err != nil {
+					cleanup()
+					return "", 0, err
+				}
+				hasCover = true
+			}
+		}
+		manifestBytes, err := buildOfftoonManifest(slug, meta, manifestChapters, hasCover)
+		if err != nil {
+			cleanup()
+			return "", 0, fmt.Errorf("archiver: %w", err)
+		}
+		if err := writeZipEntry(zw, "manifest.json", manifestBytes); err != nil {
+			cleanup()
+			return "", 0, err
+		}
+	}
+
 	if onZipping != nil {
 		onZipping()
 	}
@@ -542,9 +632,10 @@ type imageJob struct {
 
 // imageResult is what the image worker pool returns for each completed job.
 type imageResult struct {
-	index  int
-	data   []byte
-	reason string // non-empty when data is nil (fetch failed)
+	index     int
+	data      []byte
+	reason    string // non-empty when data is nil (fetch failed)
+	permanent bool   // true when retrying cannot help (404/403) — skips the rescue pass
 }
 
 // fetchImages downloads the image at each page's URL concurrently using a
@@ -553,14 +644,22 @@ type imageResult struct {
 //
 // images[i] is nil when the fetch failed; reasons[i] holds the error string
 // in that case (empty string means success).
-// Concurrency is controlled by workerpool.NewConfigImageDownload: workers are
-// capped at 8 to stay within typical CDN rate-limit thresholds.
+//
+// workerpool.NewConfigImageDownload sets how many requests may be in flight at
+// once, but the request *rate* is governed by throttle, which is shared with
+// every other chapter being downloaded in parallel. Workers that have no slot
+// yet simply park in throttle.acquire without holding a connection.
+//
+// Pages that the concurrent phase could not download are given a second chance
+// by a serial rescue pass before the results are returned.
+//
 // chapterURL is sent as the Referer header so CDNs that enforce hotlink
 // protection (e.g. gg.asuracomic.net) accept the requests.
 // onPageDone is called after every processed page, success or failure (may be nil).
-func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, client *http.Client, onPageDone func()) ([][]byte, []string, error) {
+func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, client *http.Client, throttle *cdnThrottle, onPageDone func()) ([][]byte, []string, error) {
 	images := make([][]byte, len(pages))
 	reasons := make([]string, len(pages))
+	permanents := make([]bool, len(pages))
 
 	// Build the ordered job list.
 	jobs := make([]imageJob, len(pages))
@@ -579,9 +678,9 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 			zap.String("url", job.page.ImageURL),
 		)
 
-		data, err := fetchImageWithRetry(ctx, client, job.page, job.chapterURL)
+		data, err := fetchImageWithRetry(ctx, client, job.page, job.chapterURL, throttle)
 		if err != nil {
-			zap.L().Warn("archiver: image fetch failed, skipping page",
+			zap.L().Warn("archiver: image fetch failed, deferring to rescue pass",
 				zap.Int("page", job.page.Number),
 				zap.String("url", job.page.ImageURL),
 				zap.Error(err),
@@ -589,7 +688,12 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 			// Return a nil-data result with the reason — do not propagate the
 			// error so the pool keeps running and the chapter is built from
 			// the pages that succeeded.
-			return imageResult{index: job.index, data: nil, reason: err.Error()}, nil
+			return imageResult{
+				index:     job.index,
+				data:      nil,
+				reason:    err.Error(),
+				permanent: errors.Is(err, errPermanentFetch),
+			}, nil
 		}
 		zap.L().Debug("archiver: image fetched",
 			zap.Int("page", job.page.Number),
@@ -608,6 +712,7 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 	pool.SetResultHandler(func(res imageResult) error {
 		images[res.index] = res.data
 		reasons[res.index] = res.reason
+		permanents[res.index] = res.permanent
 		// Fire on every processed page (success or failure) so page-level progress
 		// reaches its total even when some images fail.
 		if onPageDone != nil {
@@ -619,32 +724,145 @@ func fetchImages(ctx context.Context, pages []toon.Page, chapterURL string, clie
 	if err := pool.Process(jobs); err != nil {
 		return nil, nil, err
 	}
+
+	rescueFailedImages(ctx, client, pages, chapterURL, throttle, images, reasons, permanents)
+
 	return images, reasons, nil
 }
 
+// rescueAttempts is how many times the serial rescue pass retries a single page.
+const rescueAttempts = 3
+
+// rescueBaseDelay is the pause before the first rescue attempt; it doubles on
+// each subsequent one (5s → 10s → 20s).
+const rescueBaseDelay = 5 * time.Second
+
+// rescueFailedImages gives pages that failed the concurrent phase one last
+// chance, retrying them strictly one at a time with long pauses.
+//
+// A page only reaches this point after exhausting its own retries inside the
+// pool, which in practice means the CDN was rate-limiting us for the whole of
+// that window. Retrying serially — no parallelism, generous delays — is slow but
+// usually recovers those stragglers, and a handful of pages costs under a minute.
+// Without it a rate-limit burst permanently truncates the chapter.
+//
+// images and reasons are updated in place for every page recovered. Pages that
+// failed permanently (404/403) are skipped: retrying them cannot help.
+func rescueFailedImages(
+	ctx context.Context,
+	client *http.Client,
+	pages []toon.Page,
+	chapterURL string,
+	throttle *cdnThrottle,
+	images [][]byte,
+	reasons []string,
+	permanents []bool,
+) {
+	var failed []int
+	for i := range pages {
+		if images[i] == nil && !permanents[i] {
+			failed = append(failed, i)
+		}
+	}
+	if len(failed) == 0 {
+		return
+	}
+
+	zap.L().Info("archiver: rescue pass starting", zap.Int("pages", len(failed)))
+
+	rescued := 0
+	for _, i := range failed {
+		delay := rescueBaseDelay
+
+		for attempt := 1; attempt <= rescueAttempts; attempt++ {
+			// Give the CDN room to breathe before every attempt — the whole point
+			// of this pass is to be slower than the concurrent phase was.
+			if sleepUntil(ctx, time.Now().Add(delay)) != nil {
+				return // context cancelled — abandon the rescue
+			}
+			delay *= 2
+
+			if throttle.acquire(ctx) != nil {
+				return
+			}
+
+			attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			data, err := fetchImage(attemptCtx, client, pages[i], chapterURL)
+			cancel()
+
+			if err == nil {
+				images[i] = data
+				reasons[i] = ""
+				rescued++
+				zap.L().Info("archiver: page rescued", zap.Int("page", pages[i].Number))
+				break
+			}
+
+			reasons[i] = err.Error()
+
+			var rl *rateLimitedError
+			if errors.As(err, &rl) {
+				throttle.penalize(rl.retryAfter)
+			}
+			if errors.Is(err, errPermanentFetch) || ctx.Err() != nil {
+				break
+			}
+		}
+	}
+
+	zap.L().Info("archiver: rescue pass finished",
+		zap.Int("rescued", rescued),
+		zap.Int("still_failed", len(failed)-rescued),
+	)
+}
+
 // imageFetchAttempts is the number of times fetchImageWithRetry tries to
-// download a single image before giving up. A transient network hiccup or a
-// momentary CDN 5xx should not lose the page permanently.
-const imageFetchAttempts = 3
+// download a single image before giving up. A transient network hiccup, a
+// momentary CDN 5xx, or a rate-limit (429) should not lose the page permanently.
+const imageFetchAttempts = 5
 
 // imageRetryBaseDelay is the backoff before the first retry; it doubles on each
 // subsequent attempt.
 const imageRetryBaseDelay = 500 * time.Millisecond
 
+// imageRateLimitDelay is the default wait applied when a 429 response carries
+// no Retry-After header.
+const imageRateLimitDelay = 5 * time.Second
+
 // errPermanentFetch marks a fetch failure that must not be retried (e.g. an
-// HTTP 4xx — retrying a missing/forbidden image just wastes time).
+// HTTP 4xx other than 429 — retrying a missing/forbidden image just wastes time).
 var errPermanentFetch = errors.New("permanent fetch failure")
 
+// rateLimitedError is returned by fetchImage when the CDN responds with 429
+// Too Many Requests. It carries the recommended wait duration so the retry
+// loop can honour the Retry-After header instead of using exponential backoff.
+type rateLimitedError struct{ retryAfter time.Duration }
+
+func (e *rateLimitedError) Error() string {
+	return fmt.Sprintf("rate limited by CDN (retry after %s)", e.retryAfter)
+}
+
 // fetchImageWithRetry downloads a single page image, retrying on transient
-// failures (network errors, timeouts, 5xx) up to imageFetchAttempts times with
-// exponential backoff. A permanent failure (4xx) or a cancelled context stops
-// the retry loop immediately. Each attempt gets its own 30s timeout so one slow
-// hang cannot consume the whole budget.
-func fetchImageWithRetry(ctx context.Context, client *http.Client, p toon.Page, referer string) ([]byte, error) {
+// failures (network errors, timeouts, 5xx, 429) up to imageFetchAttempts times.
+// A permanent failure (4xx other than 429) or a cancelled context stops the
+// retry loop immediately.
+//
+// Every attempt first waits for a slot on the shared throttle. That wait uses
+// the parent context rather than the per-attempt one, so a long CDN cooldown is
+// not counted against the 30s budget guarding a single slow request.
+//
+// A 429 is reported to the throttle instead of being slept off locally: pausing
+// every worker is what actually lets the rate limit expire, and it means this
+// loop can simply move to the next attempt, where acquire blocks as needed.
+func fetchImageWithRetry(ctx context.Context, client *http.Client, p toon.Page, referer string, throttle *cdnThrottle) ([]byte, error) {
 	var lastErr error
 	delay := imageRetryBaseDelay
 
 	for attempt := 1; attempt <= imageFetchAttempts; attempt++ {
+		if err := throttle.acquire(ctx); err != nil {
+			return nil, err
+		}
+
 		attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		data, err := fetchImage(attemptCtx, client, p, referer)
 		cancel()
@@ -658,20 +876,30 @@ func fetchImageWithRetry(ctx context.Context, client *http.Client, p toon.Page, 
 			break
 		}
 
-		// No point sleeping after the final attempt.
-		if attempt < imageFetchAttempts {
-			zap.L().Debug("archiver: image fetch attempt failed, retrying",
-				zap.Int("page", p.Number),
-				zap.Int("attempt", attempt),
-				zap.Error(err),
-			)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-			}
-			delay *= 2
+		// No point backing off after the final attempt.
+		if attempt == imageFetchAttempts {
+			break
 		}
+
+		zap.L().Debug("archiver: image fetch attempt failed, retrying",
+			zap.Int("page", p.Number),
+			zap.Int("attempt", attempt),
+			zap.Error(err),
+		)
+
+		// Rate limited: pause every worker, then retry immediately — acquire at
+		// the top of the next iteration blocks until the cooldown has elapsed.
+		var rl *rateLimitedError
+		if errors.As(err, &rl) {
+			throttle.penalize(rl.retryAfter)
+			continue
+		}
+
+		// Transient network error or 5xx: plain exponential backoff.
+		if err := sleepUntil(ctx, time.Now().Add(delay)); err != nil {
+			return nil, err
+		}
+		delay *= 2
 	}
 	return nil, lastErr
 }
@@ -683,9 +911,7 @@ func fetchImage(ctx context.Context, client *http.Client, p toon.Page, referer s
 		return nil, err
 	}
 
-	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.8")
-	req.Header.Set("Referer", referer)
+	setBrowserImageHeaders(req, referer)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -694,9 +920,19 @@ func fetchImage(ctx context.Context, client *http.Client, p toon.Page, referer s
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
-		// 4xx responses are permanent (missing / forbidden image) — mark them so
-		// the retry loop does not waste attempts on them. 5xx and everything else
-		// stays retryable.
+		// 429 Too Many Requests: the CDN is rate-limiting us. Parse Retry-After
+		// if present so the retry loop can wait the right amount of time.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			wait := imageRateLimitDelay
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+					wait = time.Duration(secs) * time.Second
+				}
+			}
+			return nil, &rateLimitedError{retryAfter: wait}
+		}
+		// Other 4xx responses are permanent (missing / forbidden image) — mark them
+		// so the retry loop does not waste attempts on them. 5xx stays retryable.
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			return nil, fmt.Errorf("%w: unexpected status %d", errPermanentFetch, resp.StatusCode)
 		}
@@ -800,6 +1036,25 @@ func writeZipEntry(zw *zip.Writer, name string, data []byte) error {
 		return fmt.Errorf("archiver: write zip entry %q: %w", name, err)
 	}
 	return nil
+}
+
+// fetchCoverImage downloads the cover image at coverURL with browser-like
+// headers. Errors are non-fatal: the caller logs and skips.
+func fetchCoverImage(ctx context.Context, client *http.Client, coverURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	setBrowserImageHeaders(req, "")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // safeChapterName returns a filesystem-safe display name for a chapter,

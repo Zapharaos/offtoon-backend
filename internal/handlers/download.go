@@ -34,8 +34,12 @@ type downloadRequest struct {
 	ChapterIDs []string `json:"chapter_ids"`
 
 	// Format controls the per-chapter output format.
-	// Accepted values: "pdf" (default), "cbz", "images".
+	// Accepted values: "pdf" (default), "cbz", "images", "offtoon".
 	Format string `json:"format"`
+
+	// Meta carries optional series metadata written into the manifest.json of
+	// a .offtoon archive. Ignored for all other formats.
+	Meta *archiver.ToonMeta `json:"meta,omitempty"`
 }
 
 // downloadResponse is returned immediately after the download job is accepted.
@@ -144,7 +148,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		// archiver's per-chapter worker. This pipelines metadata resolution with
 		// image downloading: chapter A's images start downloading while chapter
 		// B's page list is still being fetched.
-		resolvePages := func(ctx context.Context, ch toon.Chapter) ([]toon.Page, error) {
+		resolvePages := func(ctx context.Context, ch toon.Chapter) (*toon.Chapter, error) {
 			return h.reg.ResolveChapterPages(ctx, req.Source, slug, ch.ID)
 		}
 
@@ -175,7 +179,7 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			h.trh.PushChapterReport(rt.ID, report)
 		}
 
-		archivePath, succeededChapters, err := archiver.Build(ctx, stubs, slug, format, nil, onProgress, onZipping, onChapterReport, resolvePages)
+		archivePath, succeededChapters, err := archiver.Build(ctx, stubs, slug, format, req.Meta, nil, onProgress, onZipping, onChapterReport, resolvePages)
 		if err != nil {
 			zap.L().Error("Download: pipelined download failed",
 				zap.String("runtime_id", rt.ID.String()),
@@ -188,7 +192,12 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		filename := fmt.Sprintf("%s.zip", slug)
+		var filename string
+		if format == archiver.FormatOfftoon {
+			filename = fmt.Sprintf("%s.offtoon", slug)
+		} else {
+			filename = fmt.Sprintf("%s.zip", slug)
+		}
 		h.archives.Put(rt.ID, filename, archivePath)
 
 		archiveURL := fmt.Sprintf("/api/v1/download/%s/archive", rt.ID.String())
@@ -230,7 +239,11 @@ func (h *Handler) DownloadArchive(w http.ResponseWriter, r *http.Request) {
 		_ = os.Remove(name)
 	}()
 
-	w.Header().Set("Content-Type", "application/zip")
+	contentType := "application/zip"
+	if strings.HasSuffix(filename, ".offtoon") {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	http.ServeContent(w, r, filename, time.Time{}, f)
 }

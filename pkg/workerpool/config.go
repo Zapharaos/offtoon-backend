@@ -84,8 +84,15 @@ func NewConfigChapterBuild(chapterCount int) Config {
 
 // NewConfigImageDownload creates a config tuned for HTTP I/O-bound image downloads.
 // Image fetches are high-latency (100ms–2s per request) and mostly waiting on
-// the network, so far more concurrency is needed than for CPU-bound work.
-// Workers are capped at 8 to stay within typical CDN rate-limit thresholds.
+// the network, so more concurrency is needed than for CPU-bound work.
+//
+// These workers control how many requests may be *in flight*, not how fast they
+// are issued: the archiver paces every request through a build-wide throttle
+// (see archiver.cdnThrottle). Sizing this pool against CDN rate limits would not
+// work anyway, because the archiver nests this pool inside the chapter pool —
+// the effective rate would be the product of the two. Workers are therefore kept
+// just high enough to keep the throttle saturated despite per-request latency;
+// any excess parks harmlessly waiting for a slot.
 // BatchSize is 1 so every completed image is forwarded immediately (streaming mode).
 func NewConfigImageDownload(imageCount int) Config {
 	var workers int
@@ -95,9 +102,9 @@ func NewConfigImageDownload(imageCount int) Config {
 	case imageCount <= 5:
 		workers = imageCount
 	case imageCount <= 15:
-		workers = 5
+		workers = 4
 	default:
-		workers = 8 // Cap: safe ceiling for CDN rate limits
+		workers = 4
 	}
 	return Config{
 		Workers:       workers,
