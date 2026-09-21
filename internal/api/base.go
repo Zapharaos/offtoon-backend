@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/Zapharaos/offtoon-backend/internal/toon"
 	"github.com/Zapharaos/offtoon-backend/pkg/throttle"
@@ -34,10 +35,20 @@ func NewBaseClient(name string, urls []string, cfg *throttle.Config) *BaseClient
 	return &BaseClient{
 		name:      name,
 		urls:      urls,
-		http:      &http.Client{},
+		http:      &http.Client{Timeout: requestTimeout},
 		throttler: throttle.New(name, *cfg),
 	}
 }
+
+// requestTimeout bounds a single source request end to end, headers and body.
+//
+// Without it a source that stops answering mid-connection does not fail — it
+// stalls until the OS gives up on the socket, which on Windows is ~21s per
+// attempt and is multiplied by the retry loop and the URL-fallback loop. That
+// turns one unresponsive host into minutes of apparent hanging. Every response
+// we read is a JSON document or an HTML page, so 30s is far above what a
+// healthy request needs while still failing fast on a dead one.
+const requestTimeout = 30 * time.Second
 
 // Name returns the source identifier.
 func (b *BaseClient) Name() string { return b.name }

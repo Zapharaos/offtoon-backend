@@ -8,11 +8,12 @@ import "github.com/Zapharaos/offtoon-backend/internal/toon"
 type Source = toon.Source
 
 const (
-	SourceAsura Source = toon.SourceAsura
+	SourceAsura    Source = toon.SourceAsura
+	SourceWebtoons Source = toon.SourceWebtoons
 )
 
 // allSources is the authoritative list of valid sources.
-var allSources = []Source{SourceAsura}
+var allSources = []Source{SourceAsura, SourceWebtoons}
 
 // ValidSource reports whether s is a known source.
 func ValidSource(s Source) bool {

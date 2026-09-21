@@ -15,7 +15,11 @@ logger:
 
   # Specify the logger level
   # Default value: "info"
-  level: debug
+  # Kept at "info" while diagnosing download failures: at "debug" the archiver
+  # logs two lines per image, which on a 40-chapter run is ~10k lines and
+  # evicts the chapter-failure reasons from the log buffer before they can be
+  # read. Nothing diagnostic is lost — failures are logged at warn/error.
+  level: info
 
   # Lumberjack log rotation configuration
   rotation:
@@ -192,6 +196,35 @@ clients:
       # Adaptive throttling — baseline matches measured warm latency, so the
       # slow-traffic detector triggers if responses exceed ~3x (450ms).
       baseline_response_time_ms: 150
+      slow_threshold_multiplier: 3.0
+      adaptive_enabled: true
+
+  webtoons:
+    urls:
+      - "https://www.webtoons.com"
+    # Content language segment used in every URL (/{language}/...).
+    # Episode dates and titles come back in this language.
+    language: "en"
+    throttle:
+      # Webtoons has no public JSON API, so every call here is a full
+      # server-rendered HTML page from the origin site rather than a cheap API
+      # hit. Pace is therefore more conservative than Asura's: ~1-2 req/s,
+      # which keeps a long episode-list walk reasonable without looking like a
+      # crawler to the edge.
+      # Random delay range between requests (milliseconds)
+      delay_min_ms: 400
+      delay_max_ms: 1000
+      # Sliding-window rate limit — burst safety net above the delay pacing.
+      max_requests: 20
+      window_seconds: 10
+      # Retry / backoff
+      max_attempts: 3
+      initial_backoff_ms: 1000
+      max_backoff_ms: 30000
+      backoff_multiplier: 2.0
+      # Adaptive throttling — HTML pages are heavier than JSON, so the baseline
+      # sits higher and the slow-traffic detector triggers past ~1.5s.
+      baseline_response_time_ms: 500
       slow_threshold_multiplier: 3.0
       adaptive_enabled: true
 

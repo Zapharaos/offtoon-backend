@@ -191,20 +191,41 @@ func (c *BaseClient) SendPacket(p Packet) {
 		return
 	}
 
+	// Fast path: room in the channel.
 	select {
 	case c.Send <- data:
-		c.Mutex.Lock()
-		c.ConsecutiveSendFailures = 0
-		c.LastAct = time.Now() // successful send proves the client is reachable
-		c.Mutex.Unlock()
+		c.recordSendSuccess()
+		return
 	default:
+	}
+
+	// The channel is full. A superseding packet costs nothing to discard — the
+	// next one carries fresher state — and discarding it is what keeps a burst
+	// of progress updates from evicting the packets that matter.
+	if droppable(p) {
+		zap.L().Debug("WS send channel full, dropping superseding packet",
+			zap.String("client_id", c.UserID.String()))
+		return
+	}
+
+	// Everything else has to reach the client: a lost completion or failure
+	// packet leaves it waiting forever. Wait for room, but not indefinitely —
+	// a client that has stopped reading must not stall the producer.
+	timer := time.NewTimer(essentialSendTimeout)
+	defer timer.Stop()
+
+	select {
+	case c.Send <- data:
+		c.recordSendSuccess()
+	case <-timer.C:
 		c.Mutex.Lock()
 		c.ConsecutiveSendFailures++
 		failures := c.ConsecutiveSendFailures
 		c.Mutex.Unlock()
 
-		zap.L().Warn("WS send channel blocked, dropping packet",
+		zap.L().Warn("WS send channel still full, dropping essential packet",
 			zap.String("client_id", c.UserID.String()),
+			zap.Duration("waited", essentialSendTimeout),
 			zap.Int("consecutive_failures", failures))
 
 		if failures >= c.Config.MaxConsecutiveSendFailures {
@@ -213,6 +234,19 @@ func (c *BaseClient) SendPacket(p Packet) {
 			c.Close()
 		}
 	}
+}
+
+// essentialSendTimeout is how long a packet that cannot be dropped waits for
+// room in the send channel. It only has to outlast a transient burst; a client
+// that has not drained anything by then is not reading at all.
+const essentialSendTimeout = 10 * time.Second
+
+// recordSendSuccess resets the failure counter and marks the client reachable.
+func (c *BaseClient) recordSendSuccess() {
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
+	c.ConsecutiveSendFailures = 0
+	c.LastAct = time.Now() // a successful send proves the client is reachable
 }
 
 // Close initiates a graceful shutdown of the client.

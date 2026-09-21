@@ -44,7 +44,8 @@ func ParseStatus(raw string) Status {
 type Source string
 
 const (
-	SourceAsura Source = "asura"
+	SourceAsura    Source = "asura"
+	SourceWebtoons Source = "webtoons"
 )
 
 // SearchResult is the shared data returned by any client's Search operation.

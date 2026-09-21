@@ -290,10 +290,14 @@ func Build(ctx context.Context, chapters []toon.Chapter, slug string, format For
 		return nil
 	}
 
+	// Resolved once: every chapter goes under the same top-level directory, and
+	// the handler names the archive file from the same helper so the two match.
+	seriesName := SeriesName(meta, slug)
+
 	workerFunc := func(ctx context.Context, job chapterJob) (chapterResult, error) {
 		ch := job.chapter
 		chapterName := safeChapterName(ch)
-		dirPrefix := path.Join(slug, chapterName)
+		dirPrefix := path.Join(seriesName, chapterName)
 
 		// Resolve the chapter's page URLs lazily if a resolver was provided.
 		// This is the pipelining step: chapter A's images start downloading while

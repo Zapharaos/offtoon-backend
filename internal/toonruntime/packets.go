@@ -138,6 +138,14 @@ func (p *PacketProgress) ToJSON() ([]byte, error) {
 	return json.Marshal(p)
 }
 
+// Droppable marks progress as safe to discard under back-pressure: it is a
+// counter, so the next packet supersedes this one entirely. A long download
+// emits these far faster than a browser consumes them, and dropping the excess
+// is what leaves room for the chapter reports and the completion packet.
+//
+// It implements wsruntime.Droppable.
+func (p *PacketProgress) Droppable() bool { return true }
+
 // --------------------------------------------
 // --------------------------------------------
 // --------------------------------------------

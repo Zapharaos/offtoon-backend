@@ -23,7 +23,7 @@ import (
 
 // downloadRequest is the POST body for the download endpoint.
 type downloadRequest struct {
-	// Source is the API client to use (e.g. "asura").
+	// Source is the API client to use (e.g. "asura", "webtoons").
 	Source api.Source `json:"source"`
 
 	// Slug is the source-specific toon slug.
@@ -37,8 +37,10 @@ type downloadRequest struct {
 	// Accepted values: "pdf" (default), "cbz", "images", "offtoon".
 	Format string `json:"format"`
 
-	// Meta carries optional series metadata written into the manifest.json of
-	// a .offtoon archive. Ignored for all other formats.
+	// Meta carries optional series metadata. Its Title names the archive file
+	// and the directory inside it whatever the format; the remaining fields are
+	// written into the manifest.json of a .offtoon archive and ignored
+	// otherwise.
 	Meta *archiver.ToonMeta `json:"meta,omitempty"`
 }
 
@@ -192,11 +194,16 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Named from the series title when the caller supplied metadata, so the
+		// user gets "The Ember Knight.zip" rather than the source's internal
+		// identifier. Falls back to the slug.
+		name := archiver.SeriesName(req.Meta, slug)
+
 		var filename string
 		if format == archiver.FormatOfftoon {
-			filename = fmt.Sprintf("%s.offtoon", slug)
+			filename = fmt.Sprintf("%s.offtoon", name)
 		} else {
-			filename = fmt.Sprintf("%s.zip", slug)
+			filename = fmt.Sprintf("%s.zip", name)
 		}
 		h.archives.Put(rt.ID, filename, archivePath)
 
